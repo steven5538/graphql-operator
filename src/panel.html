@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <div id="toolbar">
+    <button id="btn-record" class="tbtn" title="Pause/resume recording">
+      <span class="rec-dot"></span><span id="rec-label">Recording</span>
+    </button>
+    <button id="btn-clear" class="tbtn" title="Clear the list">Clear</button>
+    <label class="tcheck" title="Keep operations across page reloads">
+      <input type="checkbox" id="chk-preserve"> Preserve log
+    </label>
+    <input type="search" id="filter" placeholder="Filter by operation name, type, URL…">
+    <span class="chips">
+      <button class="chip active" data-f="all">All</button>
+      <button class="chip" data-f="errors">Errors <span id="chip-errors-n" class="chip-n">0</span></button>
+      <button class="chip" data-f="mutations">Mutations</button>
+      <button class="chip" data-f="ruled">Ruled</button>
+    </span>
+    <span class="spacer"></span>
+    <span id="count" class="count">0 operations</span>
+    <button id="btn-export" class="tbtn" title="Export captured operations as JSON">Export</button>
+    <button id="btn-import" class="tbtn" title="Import operations from JSON">Import</button>
+    <input type="file" id="import-file" accept="application/json,.json" style="display:none">
+    <button id="btn-rules" class="tbtn" title="Manage block / rewrite / delay / override rules">Rules <span id="rules-count" class="badge">0</span></button>
+  </div>
+
+  <div id="split">
+    <div id="list-pane">
+      <table id="op-table">
+        <thead>
+          <tr>
+            <th class="c-name">Operation</th>
+            <th class="c-type">Type</th>
+            <th class="c-status">Status</th>
+            <th class="c-time">Time</th>
+            <th class="c-when">When</th>
+          </tr>
+        </thead>
+        <tbody id="op-rows"></tbody>
+      </table>
+      <div id="empty" class="empty">
+        <p id="empty-title">No GraphQL operations yet.</p>
+        <p id="empty-hint" class="hint">Interact with the page — every GraphQL request will appear here. Right-click a row to modify, block, or resend it. (If nothing shows up, reload the page so the interceptor attaches.)</p>
+      </div>
+    </div>
+    <div id="detail-pane">
+      <div id="detail-empty" class="empty"><p>Select an operation to see details.</p></div>
+      <div id="detail" class="hidden">
+        <div id="detail-head"></div>
+        <div class="tabs">
+          <button class="tab active" data-tab="request">Request</button>
+          <button class="tab" data-tab="response">Response</button>
+          <button class="tab" data-tab="headers">Headers</button>
+          <button class="tab" data-tab="meta">Timing</button>
+        </div>
+        <div class="tabpanes">
+          <div class="tabpane active" data-pane="request"></div>
+          <div class="tabpane" data-pane="response"></div>
+          <div class="tabpane" data-pane="headers"></div>
+          <div class="tabpane" data-pane="meta"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- right-click context menu -->
+  <div id="ctx-menu" class="ctx hidden"></div>
+
+  <!-- request editor (modify & resend) -->
+  <div id="editor-backdrop" class="backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <span id="editor-title">Modify &amp; resend</span>
+        <button id="editor-close" class="x">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-row">
+          <label>Method<input type="text" id="ed-method" value="POST"></label>
+          <label class="grow">URL<input type="text" id="ed-url"></label>
+        </div>
+        <label>Headers <span class="muted">(one per line, <code>Name: value</code>)</span>
+          <textarea id="ed-headers" rows="3" spellcheck="false"></textarea>
+        </label>
+        <label class="tcheck inline"><input type="checkbox" id="ed-raw-toggle"> Edit raw JSON body</label>
+        <div id="ed-single">
+          <label>Query
+            <textarea id="ed-query" rows="10" spellcheck="false" class="mono"></textarea>
+          </label>
+          <label>Variables <span class="muted">(JSON)</span>
+            <textarea id="ed-vars" rows="5" spellcheck="false" class="mono"></textarea>
+          </label>
+        </div>
+        <div id="ed-raw" class="hidden">
+          <label>Body <span class="muted">(raw JSON)</span>
+            <textarea id="ed-body" rows="12" spellcheck="false" class="mono"></textarea>
+          </label>
+        </div>
+        <div id="ed-error" class="error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="ed-format" class="tbtn">Format JSON</button>
+        <span class="spacer"></span>
+        <button id="ed-cancel" class="tbtn">Cancel</button>
+        <button id="ed-rule" class="tbtn">Save as rewrite rule…</button>
+        <button id="ed-send" class="tbtn primary">Resend once</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- rules manager -->
+  <div id="rules-backdrop" class="backdrop hidden">
+    <div class="modal wide" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <span>Rules</span>
+        <button id="rules-close" class="x">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted">Rules apply to <b>all tabs</b> and persist until removed. Block rules return a synthetic GraphQL error; rewrite rules modify matching requests before they are sent.</p>
+        <div id="rules-list"></div>
+        <div class="rules-actions">
+          <button id="add-block" class="tbtn">+ Block rule</button>
+          <button id="add-rewrite" class="tbtn">+ Rewrite rule</button>
+          <button id="add-delay" class="tbtn">+ Delay rule</button>
+          <button id="add-override" class="tbtn">+ Override rule</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button id="rules-done" class="tbtn primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- rule editor -->
+  <div id="rule-backdrop" class="backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <span id="rule-title">Rule</span>
+        <button id="rule-close" class="x">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-row">
+          <label>Type
+            <select id="r-type">
+              <option value="block">Block</option>
+              <option value="rewrite">Rewrite</option>
+              <option value="delay">Delay</option>
+              <option value="override">Override response</option>
+            </select>
+          </label>
+          <label class="tcheck inline"><input type="checkbox" id="r-enabled" checked> Enabled</label>
+        </div>
+        <fieldset>
+          <legend>Match</legend>
+          <div class="field-row">
+            <label class="grow">Operation name <span class="muted">(optional)</span>
+              <input type="text" id="r-op-name" placeholder="e.g. SearchJobs">
+            </label>
+            <label class="tcheck inline endcap"><input type="checkbox" id="r-name-regex"> regex</label>
+            <label>Type
+              <select id="r-op-type">
+                <option value="">any</option>
+                <option value="query">query</option>
+                <option value="mutation">mutation</option>
+                <option value="subscription">subscription</option>
+              </select>
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="grow">URL contains <span class="muted">(optional)</span>
+              <input type="text" id="r-url" placeholder="e.g. /graphql">
+            </label>
+            <label>Method
+              <select id="r-method">
+                <option value="">any</option>
+                <option value="POST">POST</option>
+                <option value="GET">GET</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </label>
+          </div>
+        </fieldset>
+        <fieldset id="override-fields">
+          <legend>Override response</legend>
+          <div class="field-row">
+            <label>HTTP status<input type="number" id="o-status" value="200" min="100" max="599"></label>
+            <label class="grow">GraphQL error message <span class="muted">(shortcut — used only if body is empty)</span>
+              <input type="text" id="o-error" placeholder="e.g. Something went wrong">
+            </label>
+          </div>
+          <label>Response body <span class="muted">(raw JSON — returned to the app as-is)</span>
+            <textarea id="o-body" rows="8" spellcheck="false" class="mono"></textarea>
+          </label>
+        </fieldset>
+        <fieldset id="delay-fields">
+          <legend>Delay</legend>
+          <label>Delay before the request resolves
+            <span class="delay-input">
+              <input type="number" id="r-delay-ms" min="0" step="500" value="30000"> ms
+              <span class="muted" id="r-delay-hint">= 30s</span>
+            </span>
+          </label>
+        </fieldset>
+        <fieldset id="rewrite-fields">
+          <legend>Rewrite</legend>
+          <label>Replace query <span class="muted">(optional — leave blank to keep original)</span>
+            <textarea id="r-query" rows="4" spellcheck="false" class="mono"></textarea>
+          </label>
+          <div class="field-row">
+            <label>Variables
+              <select id="r-var-mode">
+                <option value="none">don't change</option>
+                <option value="merge">merge</option>
+                <option value="replace">replace</option>
+              </select>
+            </label>
+            <label class="grow">Variables JSON
+              <textarea id="r-vars" rows="3" spellcheck="false" class="mono"></textarea>
+            </label>
+          </div>
+          <label>Set headers <span class="muted">(one per line, <code>Name: value</code>)</span>
+            <textarea id="r-hset" rows="2" spellcheck="false"></textarea>
+          </label>
+          <label>Remove headers <span class="muted">(comma-separated)</span>
+            <input type="text" id="r-hremove" placeholder="e.g. x-debug, x-trace">
+          </label>
+        </fieldset>
+        <div id="rule-error" class="error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button id="rule-cancel" class="tbtn">Cancel</button>
+        <button id="rule-save" class="tbtn primary">Save rule</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="lib/protocol.js"></script>
+  <script src="lib/codeview.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

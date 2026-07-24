@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body { width: 300px; margin: 0; font: 13px/1.5 system-ui, sans-serif; padding: 12px; }
+    h1 { font-size: 14px; margin: 0 0 2px; display: flex; align-items: center; gap: 6px; }
+    .sub { color: #888; font-size: 12px; margin: 0 0 10px; }
+    .card { background: rgba(127,127,127,.12); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; }
+    .rule { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 12px; }
+    .rule .t { font-family: ui-monospace, monospace; font-size: 10px; padding: 0 4px; border-radius: 3px; border: 1px solid currentColor; }
+    .rule .t.block { color: #bf8700; }
+    .rule .t.rewrite { color: #0969da; }
+    .rule .t.delay { color: #0e7490; }
+    .rule .t.override { color: #8250df; }
+    .rule .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rule button { border: none; background: none; color: #cf222e; cursor: pointer; font-size: 14px; }
+    .none { color: #888; font-size: 12px; }
+    .steps { margin: 0; padding-left: 18px; color: #666; font-size: 12px; }
+    a { color: #e535ab; }
+  </style>
+</head>
+<body>
+  <h1>⬡ GraphQL Operator</h1>
+  <p class="sub">Inspect, modify, block &amp; resend GraphQL.</p>
+
+  <div class="card">
+    <b>How to use</b>
+    <ol class="steps">
+      <li>Open DevTools (<code>F12</code> / <code>⌥⌘I</code>)</li>
+      <li>Select the <b>GraphQL</b> tab</li>
+      <li>Right-click any operation for actions</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <b>Active rules (<span id="count">0</span>)</b>
+    <div id="rules"></div>
+  </div>
+
+  <script src="lib/protocol.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Dependencies (Playwright — reinstall with `npm install`)
+node_modules/
+
+# Test / Playwright artifacts
+test-results/
+playwright-report/
+.playwright/
+
+# OS / editor cruft
+.DS_Store
+*.log
