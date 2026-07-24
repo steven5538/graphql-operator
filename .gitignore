@@ -6,6 +6,9 @@ test-results/
 playwright-report/
 .playwright/
 
+# Packaged builds (share the zip directly; don't commit it)
+*.zip
+
 # OS / editor cruft
 .DS_Store
 *.log
