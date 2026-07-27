@@ -48,4 +48,4 @@ If this policy changes, the "Last updated" date above will be revised.
 
 ## Contact
 
-Questions about this policy: <your-contact-email@example.com>
+Questions about this policy: steven5538@gmail.com
