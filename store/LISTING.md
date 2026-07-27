@@ -86,7 +86,7 @@ Answer **"I do not collect or use" / uncheck every category.** The extension:
 Then check the three required certification boxes.
 
 ## Privacy policy URL
-`<host store/PRIVACY.md somewhere public and paste the URL — e.g. a GitHub Pages page or a public Gist>`
+https://github.com/steven5538/graphql-operator/blob/main/store/PRIVACY.md
 
 ## Support / homepage URL (optional)
-`<link to your repo or a support page>`
+https://github.com/steven5538/graphql-operator
