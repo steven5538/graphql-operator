@@ -143,9 +143,16 @@
     var closeOf = {};        // openLine -> closeLine (for header lines)
     ranges.forEach(function (r) { if (closeOf[r.open] == null || r.close > closeOf[r.open]) closeOf[r.open] = r.close; });
     var collapsed = {};      // openLine -> true
-    // Auto-collapse large blocks (keeps the top-level shape visible, hides bulk).
+    // Auto-collapse only large ARRAY blocks (e.g. `edges: [ … ]`) that aren't the
+    // root — this hides the bulk while keeping the object structure/shape visible.
     if (opts.autoCollapseLines > 0) {
-      Object.keys(closeOf).forEach(function (o) { o = +o; if (closeOf[o] - o > opts.autoCollapseLines) collapsed[o] = true; });
+      Object.keys(closeOf).forEach(function (o) {
+        o = +o;
+        if (o === 0) return; // never fold the root
+        if (closeOf[o] - o <= opts.autoCollapseLines) return; // not large
+        var trimmed = (lines[o] || '').replace(/\s+$/, '');
+        if (trimmed.charAt(trimmed.length - 1) === '[') collapsed[o] = true; // arrays only
+      });
     }
 
     var wrap = doc.createElement('div');

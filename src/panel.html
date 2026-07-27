@@ -119,7 +119,7 @@
         <button id="rules-close" class="x">&times;</button>
       </div>
       <div class="modal-body">
-        <p class="muted">Rules apply to <b>all tabs</b> and persist until removed. Block rules return a synthetic GraphQL error; rewrite rules modify matching requests before they are sent.</p>
+        <p class="muted">Rules apply to <b>all tabs</b> and persist until removed. <b>Block</b> returns a synthetic GraphQL error, <b>Rewrite</b> edits the outgoing request, <b>Delay</b> holds it, and <b>Override</b> returns a mocked response — matched by name, regex, type, method, or URL.</p>
         <div id="rules-list"></div>
         <div class="rules-actions">
           <button id="add-block" class="tbtn">+ Block rule</button>
