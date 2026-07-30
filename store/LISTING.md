@@ -38,6 +38,10 @@ _(120 characters — check the counter after any edit.)_
 >   `...FragmentSpreads` in place so fragment‑heavy queries read as one tree.
 > • Filter by text or by chips (errors / mutations / ruled), and find text inside a
 >   query or response.
+> • **Search all requests** (Ctrl/Cmd+F) — one string searched across every recorded
+>   operation's variables, query text, response bodies and headers. Hits are grouped per
+>   operation with the field and line number, and clicking one jumps straight to that
+>   line. Scope to variables/query/response/headers, with match‑case and regex.
 >
 > **Act on any operation (right‑click)**
 > • **Resend** — replay a captured request (runs in the page, so cookies/auth are kept).

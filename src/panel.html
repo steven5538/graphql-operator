@@ -14,6 +14,7 @@
       <input type="checkbox" id="chk-preserve"> Preserve log
     </label>
     <input type="search" id="filter" placeholder="Filter by operation name, type, URL…">
+    <button id="btn-search" class="tbtn" title="Search every request's variables, query, response &amp; headers (Ctrl/Cmd+F)">Search all</button>
     <span class="chips">
       <button class="chip active" data-f="all">All</button>
       <button class="chip" data-f="errors">Errors <span id="chip-errors-n" class="chip-n">0</span></button>
@@ -28,7 +29,30 @@
     <button id="btn-rules" class="tbtn" title="Manage block / rewrite / delay / override rules">Rules <span id="rules-count" class="badge">0</span></button>
   </div>
 
+  <!-- global search across every recorded operation -->
+  <div id="searchbar" class="hidden">
+    <input type="search" id="search-input" placeholder="Search all requests — a variable value, an id, a response field…">
+    <button id="s-case" class="sopt" title="Match case">Aa</button>
+    <button id="s-regex" class="sopt" title="Regular expression">.*</button>
+    <span class="chips" id="search-scopes">
+      <button class="chip active" data-s="all">Everywhere</button>
+      <button class="chip" data-s="vars">Variables</button>
+      <button class="chip" data-s="query">Query</button>
+      <button class="chip" data-s="response">Response</button>
+      <button class="chip" data-s="headers">Headers</button>
+    </span>
+    <span id="search-count" class="count"></span>
+    <span class="spacer"></span>
+    <span class="muted" id="search-nav-hint">Enter / Shift+Enter to step</span>
+    <button id="search-close" class="tbtn" title="Back to the operation list (Esc)">Close</button>
+  </div>
+
   <div id="split">
+    <div id="search-pane" class="hidden">
+      <div id="search-error" class="error hidden"></div>
+      <div id="search-results"></div>
+      <div id="search-empty" class="empty"><p id="search-empty-text"></p></div>
+    </div>
     <div id="list-pane">
       <table id="op-table">
         <thead>
@@ -245,6 +269,7 @@
 
   <script src="lib/protocol.js"></script>
   <script src="lib/codeview.js"></script>
+  <script src="lib/search.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>

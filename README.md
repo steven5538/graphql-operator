@@ -20,6 +20,12 @@ menu — plus persistent rules that intercept future traffic.
 - **Filter & find** — filter the list by text and by chips (All / Errors / Mutations /
   Ruled, with a live errored-op count); find-in-viewer box highlights matches in the
   query/response.
+- **Search all requests** (`Search all` button or `Ctrl/Cmd+F`) — one string searched
+  across **every** recorded operation: variable values, query text, request/response
+  bodies, headers, operation names and URLs. Hits are grouped per operation with the
+  field and line number; clicking one opens that operation on the right tab and scrolls
+  to the matching line. Scope it to Variables / Query / Response / Headers, and toggle
+  match-case (`Aa`) or regex (`.*`); `Enter` / `Shift+Enter` step through hits.
 - **Right-click any operation:**
   - **Resend** — replay the exact captured request (runs in the page, so cookies /
     auth are preserved).
@@ -131,6 +137,7 @@ src/
   popup.html/js        toolbar popup (rules overview)
   lib/protocol.js      shared constants (isolated content script, background, pages)
   lib/codeview.js      GraphQL/JSON pretty-printer + foldable, highlighted viewer
+  lib/search.js        cross-request text search (fields, matcher, line numbers)
 tools/gen-icons.js     dependency-free PNG icon generator
 icons/                 icon16/48/128.png
 test/e2e.mjs           Playwright end-to-end test (loads the extension in Chromium)
@@ -143,8 +150,9 @@ test/e2e.mjs           Playwright end-to-end test (loads the extension in Chromi
 ## Tests
 
 An end-to-end Playwright test loads the unpacked extension into Chromium and exercises
-recording, blocking, rewriting, resend, delay, and the foldable code viewer against a
-mock GraphQL server:
+recording, blocking, rewriting, resend, delay, the foldable code viewer, and the
+cross-request search (both the library and the real panel UI) against a mock GraphQL
+server:
 
 ```bash
 npm install                     # installs playwright

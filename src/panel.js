@@ -102,16 +102,19 @@
     updateCount();
     updateEmpty();
     updateChips();
+    scheduleSearch();
   }
 
   function patchRecord(id, patch) {
     var rec = byId[id];
     if (!rec) { pendingPatches[id] = Object.assign(pendingPatches[id] || {}, patch); return; }
     Object.assign(rec, patch);
+    delete searchFieldCache[id]; // body/headers may have changed — re-derive on next search
     if (rowById[id]) updateRowCells(rec);
     else if (matchesFilter(rec)) appendRow(rec);
     if (selectedId === id) renderDetail(rec);
     updateChips();
+    scheduleSearch();
   }
 
   function clearAll() {
@@ -119,12 +122,14 @@
     byId = Object.create(null);
     rowById = Object.create(null);
     pendingPatches = Object.create(null);
+    searchFieldCache = Object.create(null);
     selectedId = null;
     $('op-rows').textContent = '';
     $('detail').classList.add('hidden');
     $('detail-empty').classList.remove('hidden');
     updateCount();
     updateEmpty();
+    if (searchOpen) runSearch();
   }
 
   // ---- filtering ---------------------------------------------------------
@@ -287,9 +292,13 @@
     try { JSON.parse(typeof text === 'string' ? text : JSON.stringify(text)); parses = true; } catch (e) {}
     return parses ? codeBlock(prettyJson(text), 'json', opts) : el('pre', { class: 'block', text: String(text) });
   }
+  // Tags a code block with the search key its text was derived from (see
+  // lib/search.js) so a search hit can find the block and scroll to the line.
+  function tagged(node, sk) { if (node && sk) node.setAttribute('data-sk', sk); return node; }
+
   // Query viewer with an "Inline fragments" toggle (shown only when the query
   // actually uses fragment spreads).
-  function queryBlock(query) {
+  function queryBlock(query, sk) {
     var wrap = el('div');
     var holder = el('div');
     var cb = el('input', { type: 'checkbox' });
@@ -299,7 +308,7 @@
       holder.textContent = '';
       var q = query || '(not available)';
       if (cb.checked && window.GQLCode && GQLCode.inlineFragments) { try { q = GQLCode.inlineFragments(query); } catch (e) {} }
-      holder.appendChild(codeBlock(q, 'graphql'));
+      holder.appendChild(tagged(codeBlock(q, 'graphql'), cb.checked ? null : sk));
     }
     cb.addEventListener('change', render);
     if (!/\.\.\.[A-Za-z_]/.test(query || '')) bar.style.display = 'none'; // no fragment spreads → hide toggle
@@ -310,21 +319,28 @@
   }
 
   // A find box that highlights matching rows across the code viewers in a pane.
+  // Also exposes paneEl.__applyFind(term, matcher) so a global-search hit can
+  // light up the same rows (matcher may be a regex one — see lib/search.js).
   function makeFindBar(paneEl) {
     var input = el('input', { type: 'search', class: 'find-input', placeholder: 'Find…' });
     var count = el('span', { class: 'find-count muted' });
-    input.addEventListener('input', function () {
-      var term = input.value.toLowerCase();
+    function apply(matcher, scroll) {
       var total = 0;
       Array.prototype.forEach.call(paneEl.querySelectorAll('.codeview .cv-row'), function (row) {
         row.classList.remove('cv-match');
-        if (!term) return;
+        if (!matcher) return;
         row.style.display = ''; // reveal folded rows so matches are visible
-        if (row.textContent.toLowerCase().indexOf(term) !== -1) { row.classList.add('cv-match'); total++; }
+        if (GQLSearch.matchRanges(matcher, row.textContent).length) { row.classList.add('cv-match'); total++; }
       });
-      count.textContent = term ? (total + (total === 1 ? ' match' : ' matches')) : '';
-      if (term) { var first = paneEl.querySelector('.cv-row.cv-match'); if (first) first.scrollIntoView({ block: 'nearest' }); }
+      count.textContent = matcher ? (total + (total === 1 ? ' match' : ' matches')) : '';
+      if (matcher && scroll) { var first = paneEl.querySelector('.cv-row.cv-match'); if (first) first.scrollIntoView({ block: 'nearest' }); }
+      return total;
+    }
+    input.addEventListener('input', function () {
+      var term = input.value;
+      apply(term ? { needle: term.toLowerCase(), ci: true } : null, true);
     });
+    paneEl.__applyFind = function (term, matcher) { input.value = term || ''; apply(matcher || null, false); };
     return el('div', { class: 'findbar' }, [input, count]);
   }
 
@@ -346,13 +362,13 @@
     (rec.entries || []).forEach(function (entry, i) {
       reqPane.appendChild(el('div', { class: 'section-label', text: 'Query' + ((rec.entries.length > 1) ? ' #' + (i + 1) + ' — ' + entry.operationName : '') }));
       if (entry.persisted) reqPane.appendChild(el('div', { class: 'muted', text: 'Persisted query (hash only — no query text sent).' }));
-      reqPane.appendChild(queryBlock(entry.query)); // foldable, with inline-fragments toggle
+      reqPane.appendChild(queryBlock(entry.query, 'q' + i)); // foldable, with inline-fragments toggle
       reqPane.appendChild(el('div', { class: 'section-label', text: 'Variables' }));
-      reqPane.appendChild(codeBlock(prettyJson(entry.variables != null ? entry.variables : {}), 'json', { autoCollapseLines: AUTO_COLLAPSE }));
+      reqPane.appendChild(tagged(codeBlock(prettyJson(entry.variables != null ? entry.variables : {}), 'json', { autoCollapseLines: AUTO_COLLAPSE }), 'v' + i));
     });
     if (rec.requestBody) {
       reqPane.appendChild(el('div', { class: 'section-label', text: 'Raw request body' + (rec.requestBodyTruncated ? ' (truncated — resend disabled)' : '') }));
-      reqPane.appendChild(jsonOrPre(rec.requestBody, { autoCollapseLines: AUTO_COLLAPSE }));
+      reqPane.appendChild(tagged(jsonOrPre(rec.requestBody, { autoCollapseLines: AUTO_COLLAPSE }), 'rb'));
     }
 
     // response
@@ -364,7 +380,7 @@
     resPane.appendChild(el('div', { text: (rec.status != null ? String(rec.status) : 'pending') + (rec.statusText ? ' ' + rec.statusText : '') + (rec.durationMs != null ? '  ·  ' + Math.round(rec.durationMs) + ' ms' : '') }));
     if (rec.error) { resPane.appendChild(el('div', { class: 'section-label', text: 'Error' })); resPane.appendChild(el('pre', { class: 'block', text: rec.error })); }
     resPane.appendChild(el('div', { class: 'section-label', text: 'Body' }));
-    resPane.appendChild(rec.responseBody != null ? jsonOrPre(rec.responseBody, { autoCollapseLines: AUTO_COLLAPSE }) : el('pre', { class: 'block', text: '(no response yet)' }));
+    resPane.appendChild(rec.responseBody != null ? tagged(jsonOrPre(rec.responseBody, { autoCollapseLines: AUTO_COLLAPSE }), 'res') : el('pre', { class: 'block', text: '(no response yet)' }));
 
     // headers
     var hPane = document.querySelector('.tabpane[data-pane="headers"]');
@@ -410,6 +426,235 @@
     return t;
   }
 
+  function activateTab(name) {
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
+      t.classList.toggle('active', t.getAttribute('data-tab') === name);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.tabpane'), function (p) {
+      p.classList.toggle('active', p.getAttribute('data-pane') === name);
+    });
+  }
+
+  // ---- global search (across every recorded operation) -------------------
+  // Answers "which request carried this id / returned this value?" — scans the
+  // query text, variables, request & response bodies and headers of every
+  // record, groups the hits per operation, and jumps to the matching line.
+  var searchOpen = false;
+  var searchTerm = '';
+  var searchOpts = { caseSensitive: false, regex: false };
+  var searchScope = 'all';
+  var searchFieldCache = Object.create(null); // id -> searchable fields (cleared on patch)
+  var searchTimer = null;
+  var searchHits = [];   // flat, in render order — drives Enter / Shift+Enter
+  var activeHit = -1;
+
+  function cachedFields(rec) {
+    var f = searchFieldCache[rec.id];
+    if (!f) { f = GQLSearch.fieldsFor(rec); searchFieldCache[rec.id] = f; }
+    return f;
+  }
+  function currentMatcher() {
+    try { return GQLSearch.buildMatcher(searchTerm, searchOpts); } catch (e) { return null; }
+  }
+
+  function openSearch() {
+    searchOpen = true;
+    $('searchbar').classList.remove('hidden');
+    $('search-pane').classList.remove('hidden');
+    $('list-pane').classList.add('hidden');
+    $('btn-search').classList.add('active');
+    $('search-input').focus();
+    $('search-input').select();
+    runSearch();
+  }
+  function closeSearch() {
+    searchOpen = false;
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    $('searchbar').classList.add('hidden');
+    $('search-pane').classList.add('hidden');
+    $('list-pane').classList.remove('hidden');
+    $('btn-search').classList.remove('active');
+  }
+  function toggleSearch() { if (searchOpen) closeSearch(); else openSearch(); }
+
+  // Records keep arriving (and responses land as patches) while search is open.
+  function scheduleSearch() {
+    if (!searchOpen || !searchTerm) return;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { searchTimer = null; runSearch(); }, 250);
+  }
+
+  function searchEmptyMsg(text) {
+    $('search-empty-text').textContent = text;
+    $('search-empty').classList.toggle('hidden', !text);
+  }
+
+  function runSearch() {
+    if (!searchOpen) return;
+    var host = $('search-results');
+    var pane = $('search-pane');
+    var keepScroll = pane.scrollTop;
+    host.textContent = '';
+    searchHits = [];
+    activeHit = -1;
+    $('search-error').classList.add('hidden');
+    $('search-count').textContent = '';
+
+    if (!searchTerm) {
+      searchEmptyMsg('Type to search across all ' + records.length + ' recorded operation' + (records.length === 1 ? '' : 's') +
+        ' — variable values, query text, response bodies and headers. The list filters above are ignored here.');
+      return;
+    }
+    var matcher;
+    try { matcher = GQLSearch.buildMatcher(searchTerm, searchOpts); }
+    catch (e) {
+      searchEmptyMsg('');
+      var err = $('search-error');
+      err.textContent = 'Invalid regular expression: ' + e.message;
+      err.classList.remove('hidden');
+      return;
+    }
+
+    var res = GQLSearch.searchAll(records, matcher, { scope: searchScope, fieldsFor: cachedFields });
+    res.groups.forEach(function (g) { host.appendChild(renderSearchGroup(g)); });
+
+    if (!res.groups.length) {
+      searchEmptyMsg('No matches in ' + records.length + ' recorded operation' + (records.length === 1 ? '' : 's') + '.');
+    } else {
+      searchEmptyMsg('');
+      $('search-count').textContent = res.totalMatches + (res.totalMatches === 1 ? ' match in ' : ' matches in ') +
+        res.groups.length + (res.groups.length === 1 ? ' operation' : ' operations');
+    }
+    pane.scrollTop = keepScroll;
+  }
+
+  function renderSearchGroup(g) {
+    var rec = g.rec;
+    var st = statusInfo(rec);
+    var head = el('div', { class: 'sr-head' }, [
+      el('span', { class: 'dot ' + st.cls }),
+      el('span', { class: 'sr-op', text: rec.operationName, title: rec.operationName }),
+      el('span', { class: 'type-badge ' + rec.operationType, text: rec.operationType }),
+      el('span', { class: 'muted', text: g.total + (g.total === 1 ? ' match' : ' matches') }),
+      el('span', { class: 'spacer' }),
+      el('span', { class: 'muted', text: rec.ts ? new Date(rec.ts).toLocaleTimeString() : '' })
+    ]);
+    head.addEventListener('click', function () { selectRecord(rec.id); });
+    head.addEventListener('contextmenu', function (e) { e.preventDefault(); selectRecord(rec.id); showContextMenu(e.clientX, e.clientY, rec); });
+
+    var group = el('div', { class: 'sr-group' }, [head]);
+    g.matches.forEach(function (m) {
+      var idx = searchHits.length;
+      var btn = el('button', { class: 'sr-hit' }, [
+        el('span', { class: 'sr-field', text: m.field.label + (m.field.single ? '' : ':' + (m.line + 1)) }),
+        snippet(m.text, m.ranges)
+      ]);
+      btn.addEventListener('click', function () { jumpToHit(idx); });
+      searchHits.push({ rec: rec, field: m.field, match: m, node: btn });
+      group.appendChild(btn);
+    });
+    if (g.total > g.matches.length) {
+      group.appendChild(el('div', { class: 'sr-more', text: '+ ' + (g.total - g.matches.length) + ' more match(es) — open the operation to see them all' }));
+    }
+    return group;
+  }
+
+  // One result line: the matching text, dedented, windowed around the first hit.
+  function snippet(line, ranges) {
+    var lead = /^\s*/.exec(line)[0].length;
+    var disp = line.slice(lead);
+    var rs = ranges.map(function (r) { return [Math.max(0, r[0] - lead), Math.max(0, r[1] - lead)]; });
+    var start = Math.max(0, rs[0][0] - 48);
+    var end = Math.min(disp.length, start + 260);
+    var out = el('span', { class: 'sr-snip' });
+    if (start > 0) out.appendChild(el('span', { class: 'muted', text: '…' }));
+    var pos = start;
+    rs.forEach(function (r) {
+      if (r[1] <= start || r[0] >= end) return;
+      var s = Math.max(r[0], start), e = Math.min(r[1], end);
+      if (s > pos) out.appendChild(document.createTextNode(disp.slice(pos, s)));
+      out.appendChild(el('span', { class: 's-hit', text: disp.slice(s, e) }));
+      pos = e;
+    });
+    if (pos < end) out.appendChild(document.createTextNode(disp.slice(pos, end)));
+    if (end < disp.length) out.appendChild(el('span', { class: 'muted', text: '…' }));
+    return out;
+  }
+
+  // Open the hit's operation on the right tab and scroll to the exact line.
+  function jumpToHit(i) {
+    if (i < 0 || i >= searchHits.length) return;
+    if (activeHit >= 0 && searchHits[activeHit]) searchHits[activeHit].node.classList.remove('active');
+    activeHit = i;
+    var h = searchHits[i];
+    h.node.classList.add('active');
+    h.node.scrollIntoView({ block: 'nearest' });
+
+    selectRecord(h.rec.id); // re-renders the detail pane
+    activateTab(h.field.tab);
+    var pane = document.querySelector('.tabpane[data-pane="' + h.field.tab + '"]');
+    if (!pane) return;
+    var matcher = currentMatcher();
+    if (pane.__applyFind) pane.__applyFind(searchTerm, matcher);
+    highlightKvRows(pane, matcher);
+
+    var blk = h.field.sk ? pane.querySelector('[data-sk="' + h.field.sk + '"]') : null;
+    var rows = blk ? blk.querySelectorAll('.cv-row') : null;
+    var row = rows && rows[h.match.line];
+    if (row) {
+      row.style.display = ''; // may have been folded away
+      row.classList.add('cv-match', 'cv-active');
+      row.scrollIntoView({ block: 'center' });
+    } else if (blk) {
+      blk.scrollIntoView({ block: 'nearest' });
+    }
+  }
+  function stepHit(delta) {
+    if (!searchHits.length) return;
+    var next = activeHit < 0 ? (delta > 0 ? 0 : searchHits.length - 1) : (activeHit + delta + searchHits.length) % searchHits.length;
+    jumpToHit(next);
+  }
+
+  // Headers / Timing tabs render key-value tables, not code views.
+  function highlightKvRows(pane, matcher) {
+    var first = null;
+    Array.prototype.forEach.call(pane.querySelectorAll('table.kv tr'), function (tr) {
+      tr.classList.remove('kv-match');
+      if (!matcher) return;
+      if (GQLSearch.matchRanges(matcher, tr.textContent).length) { tr.classList.add('kv-match'); if (!first) first = tr; }
+    });
+    if (first) first.scrollIntoView({ block: 'nearest' });
+  }
+
+  $('btn-search').addEventListener('click', toggleSearch);
+  $('search-close').addEventListener('click', closeSearch);
+  $('search-input').addEventListener('input', function () {
+    searchTerm = $('search-input').value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { searchTimer = null; runSearch(); }, 140);
+  });
+  $('search-input').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; runSearch(); } stepHit(e.shiftKey ? -1 : 1); }
+  });
+  $('s-case').addEventListener('click', function () {
+    searchOpts.caseSensitive = !searchOpts.caseSensitive;
+    $('s-case').classList.toggle('on', searchOpts.caseSensitive);
+    runSearch();
+  });
+  $('s-regex').addEventListener('click', function () {
+    searchOpts.regex = !searchOpts.regex;
+    $('s-regex').classList.toggle('on', searchOpts.regex);
+    runSearch();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#search-scopes .chip'), function (chip) {
+    chip.addEventListener('click', function () {
+      Array.prototype.forEach.call(document.querySelectorAll('#search-scopes .chip'), function (c) { c.classList.remove('active'); });
+      chip.classList.add('active');
+      searchScope = chip.getAttribute('data-s');
+      runSearch();
+    });
+  });
+
   // ---- context menu ------------------------------------------------------
   function showContextMenu(x, y, rec) {
     contextRecord = rec;
@@ -449,9 +694,23 @@
   }
   function hideContextMenu() { $('ctx-menu').classList.add('hidden'); }
   document.addEventListener('click', function (e) { if (!$('ctx-menu').contains(e.target)) hideContextMenu(); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { hideContextMenu(); closeAllModals(); } });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      hideContextMenu();
+      var modalOpen = ['editor-backdrop', 'rules-backdrop', 'rule-backdrop'].some(function (id) { return !$(id).classList.contains('hidden'); });
+      if (modalOpen) closeAllModals();
+      else if (searchOpen) closeSearch();
+      return;
+    }
+    // Cmd/Ctrl+F (and +Shift+F) open the cross-request search from anywhere.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      if (searchOpen) { $('search-input').focus(); $('search-input').select(); } else openSearch();
+    }
+  });
   window.addEventListener('blur', hideContextMenu);
   $('list-pane').addEventListener('scroll', hideContextMenu);
+  $('search-pane').addEventListener('scroll', hideContextMenu);
 
   function primaryOpName(rec) {
     if (rec.entries && rec.entries.length && rec.entries[0].operationName) return rec.entries[0].operationName;
@@ -886,12 +1145,7 @@
 
   // tabs
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
-    tab.addEventListener('click', function () {
-      document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
-      document.querySelectorAll('.tabpane').forEach(function (p) { p.classList.remove('active'); });
-      tab.classList.add('active');
-      document.querySelector('.tabpane[data-pane="' + tab.getAttribute('data-tab') + '"]').classList.add('active');
-    });
+    tab.addEventListener('click', function () { activateTab(tab.getAttribute('data-tab')); });
   });
 
   // backdrops: click outside modal closes

@@ -327,7 +327,184 @@ async function setRules(sw, rules) {
   check('regex /^Search/ leaves GetProfile alone', !missBlocked && rxMiss.data && rxMiss.data.echo.operationName === 'GetProfile');
   await setRules(sw, []);
 
-  console.log('\n[13] no fatal page errors');
+  console.log('\n[13] search library finds strings across records');
+  const sPage = await context.newPage();
+  await sPage.goto('about:blank');
+  await sPage.addScriptTag({ path: EXT + '/src/lib/codeview.js' });
+  await sPage.addScriptTag({ path: EXT + '/src/lib/search.js' });
+  const sl = await sPage.evaluate(() => {
+    const rec = {
+      id: 'r1', operationName: 'GetUser', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql',
+      entries: [{ operationName: 'GetUser', query: 'query GetUser($userId: ID!) { user(id: $userId) { id email } }', variables: { userId: 'abc-123' } }],
+      requestBody: JSON.stringify({ operationName: 'GetUser', variables: { userId: 'abc-123' } }),
+      responseBody: JSON.stringify({ data: { user: { id: 'abc-123', email: 'nobody@ex.test' } } }),
+      requestHeaders: { 'x-request-id': 'trace-777' }, responseHeaders: { 'content-type': 'application/json' }
+    };
+    const run = (term, opts, scope) => GQLSearch.searchAll([rec], GQLSearch.buildMatcher(term, opts || {}), { scope: scope });
+
+    const all = run('abc-123');
+    const labels = all.groups[0].matches.map((m) => m.field.label);
+    const varsOnly = run('abc-123', {}, 'vars');
+    const respOnly = run('abc-123', {}, 'response');
+    const headers = run('trace-777', {}, 'headers');
+    const ci = run('ABC-123');
+    const cs = run('ABC-123', { caseSensitive: true });
+    const rx = run('abc-\\d+', { regex: true });
+    let badRegex = false;
+    try { GQLSearch.buildMatcher('(', { regex: true }); } catch (e) { badRegex = true; }
+
+    // the promise of the feature: a reported line number is the code viewer's row
+    const respField = GQLSearch.fieldsFor(rec).filter((f) => f.key === 'response')[0];
+    const hit = GQLSearch.searchRecord(rec, GQLSearch.buildMatcher('nobody@ex.test', {}), { scope: 'response' }).matches[0];
+    const rows = GQLCode.renderFoldableCode(respField.text, 'json').querySelectorAll('.cv-row');
+    const lineAligns = rows[hit.line].textContent.indexOf('nobody@ex.test') !== -1;
+
+    return {
+      labels, total: all.totalMatches,
+      varsOnly: varsOnly.groups[0].matches.length, respOnly: respOnly.groups[0].matches.length,
+      headerHit: headers.groups.length && headers.groups[0].matches[0].field.label,
+      ci: ci.totalMatches, cs: cs.totalMatches, rx: rx.totalMatches, badRegex, lineAligns,
+      snippet: hit.text.trim()
+    };
+  });
+  check('finds the value in variables and response', sl.total === 2, sl);
+  check('does not double-report the raw body when entries carry the text', sl.labels.join(',') === 'Variables,Response', sl.labels);
+  check('scope=vars searches only variables', sl.varsOnly === 1 && sl.respOnly === 1, sl);
+  check('searches headers', sl.headerHit === 'Request header', sl.headerHit);
+  check('case-insensitive by default, exact with match-case', sl.ci === 2 && sl.cs === 0, [sl.ci, sl.cs]);
+  check('regex mode matches by pattern', sl.rx === 2, sl.rx);
+  check('invalid regex is reported, not swallowed', sl.badRegex);
+  check('reported line number is the code viewer row', sl.lineAligns, sl.snippet);
+  await sPage.close();
+
+  console.log('\n[14] panel UI: global search lists hits and jumps to them');
+  const panelPage = await context.newPage();
+  const panelErrors = [];
+  panelPage.on('pageerror', (e) => panelErrors.push(String(e)));
+  // panel.js needs the devtools API; stub the one property it reads. A tabId no
+  // real tab owns keeps the background's buffer out of this fixture.
+  await panelPage.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: 999999 } }; } catch (e) {}
+  });
+  await panelPage.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+
+  const fixture = {
+    tool: 'graphql-operator', version: 1,
+    operations: [
+      { id: 'sf1', operationName: 'GetUser', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql', status: 200, ts: 1700000000000,
+        entries: [{ operationName: 'GetUser', query: 'query GetUser($userId: ID!) { user(id: $userId) { id email } }', variables: { userId: 'abc-123' } }],
+        responseBody: JSON.stringify({ data: { user: { id: 'abc-123', email: 'nobody@ex.test' } } }),
+        requestHeaders: { 'x-request-id': 'trace-777' }, responseHeaders: { 'content-type': 'application/json' } },
+      { id: 'sf2', operationName: 'ListJobs', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql', status: 200, ts: 1700000001000,
+        entries: [{ operationName: 'ListJobs', query: 'query ListJobs { jobs { id title } }', variables: { limit: 10 } }],
+        responseBody: JSON.stringify({ data: { jobs: [{ id: 'j1', title: 'Cook' }, { id: 'abc-123', title: 'Barista' }] } }) },
+      { id: 'sf3', operationName: 'SaveThing', operationType: 'mutation', method: 'POST', url: 'https://ex.test/graphql', status: 200, ts: 1700000002000,
+        entries: [{ operationName: 'SaveThing', query: 'mutation SaveThing($in: In!) { save(in: $in) { ok } }', variables: { in: { note: 'ABC-123 upper' } } }],
+        responseBody: JSON.stringify({ data: { save: { ok: true } } }) }
+    ]
+  };
+  await panelPage.setInputFiles('#import-file', {
+    name: 'fixture.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(fixture))
+  });
+  await panelPage.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 3);
+
+  await panelPage.click('#btn-search');
+  const searchVisible = await panelPage.isVisible('#search-pane');
+  check('search pane opens from the toolbar', searchVisible);
+
+  async function typeSearch(term) {
+    await panelPage.fill('#search-input', term);
+    await sleep(260); // debounce
+    return panelPage.evaluate(() => ({
+      groups: document.querySelectorAll('.sr-group').length,
+      hits: document.querySelectorAll('.sr-hit').length,
+      count: document.getElementById('search-count').textContent,
+      fields: Array.prototype.map.call(document.querySelectorAll('.sr-hit .sr-field'), (f) => f.textContent),
+      ops: Array.prototype.map.call(document.querySelectorAll('.sr-head .sr-op'), (o) => o.textContent),
+      marked: document.querySelectorAll('.sr-hit .s-hit').length
+    }));
+  }
+
+  const r = await typeSearch('abc-123');
+  check('groups hits by operation across all requests', r.groups === 3 && r.ops.join(',') === 'GetUser,ListJobs,SaveThing', r);
+  check('lists every matching line', r.hits === 4, r.hits);
+  check('labels the field and line of each hit', r.fields.some((f) => /^Variables:\d+$/.test(f)) && r.fields.some((f) => /^Response:\d+$/.test(f)), r.fields);
+  check('highlights the matched text in the snippet', r.marked >= 4, r.marked);
+  check('summarises the match count', /4 matches in 3 operations/.test(r.count), r.count);
+
+  await panelPage.click('#search-scopes .chip[data-s="vars"]');
+  await sleep(120);
+  const scoped = await panelPage.evaluate(() => ({
+    groups: document.querySelectorAll('.sr-group').length,
+    fields: Array.prototype.map.call(document.querySelectorAll('.sr-hit .sr-field'), (f) => f.textContent)
+  }));
+  check('scope chip narrows the search to variables', scoped.groups === 2 && scoped.fields.every((f) => /^Variables/.test(f)), scoped);
+  await panelPage.click('#search-scopes .chip[data-s="all"]');
+  await sleep(120);
+
+  await panelPage.click('#s-case');
+  await sleep(120);
+  const cased = await panelPage.evaluate(() => Array.prototype.map.call(document.querySelectorAll('.sr-head .sr-op'), (o) => o.textContent));
+  check('match-case toggle drops the upper-case-only record', cased.join(',') === 'GetUser,ListJobs', cased);
+  await panelPage.click('#s-case');
+  await sleep(120);
+
+  await panelPage.click('#s-regex');
+  await panelPage.fill('#search-input', 'abc-\\d+');
+  await sleep(260);
+  const regexed = await panelPage.evaluate(() => document.querySelectorAll('.sr-group').length);
+  check('regex toggle searches by pattern', regexed === 3, regexed);
+  await panelPage.fill('#search-input', '(');
+  await sleep(260);
+  const badRegexShown = await panelPage.isVisible('#search-error');
+  check('invalid regex shows an error instead of results', badRegexShown);
+  await panelPage.click('#s-regex');
+
+  await panelPage.fill('#search-input', 'nobody@ex.test');
+  await sleep(260);
+  await panelPage.click('.sr-hit');
+  await sleep(120);
+  const jumped = await panelPage.evaluate(() => {
+    const active = document.querySelector('#detail .cv-row.cv-active');
+    return {
+      op: document.querySelector('#detail-head .op-name').textContent,
+      tab: (document.querySelector('.tab.active') || {}).textContent,
+      activeText: active ? active.textContent : null,
+      selectedRow: !!document.querySelector('#op-rows tr.selected'),
+      findValue: (document.querySelector('.tabpane[data-pane="response"] .find-input') || {}).value
+    };
+  });
+  check('clicking a hit opens that operation', jumped.op === 'GetUser', jumped.op);
+  check('clicking a hit switches to the matching tab', jumped.tab === 'Response', jumped.tab);
+  check('clicking a hit highlights the exact matching line', !!jumped.activeText && jumped.activeText.indexOf('nobody@ex.test') !== -1, jumped.activeText);
+  check('the detail find box is primed with the term', jumped.findValue === 'nobody@ex.test', jumped.findValue);
+
+  await panelPage.fill('#search-input', 'abc-123');
+  await sleep(260);
+  await panelPage.focus('#search-input');
+  await panelPage.keyboard.press('Enter');
+  await sleep(120);
+  const firstStep = await panelPage.evaluate(() => document.querySelector('#detail-head .op-name').textContent);
+  await panelPage.keyboard.press('Enter');
+  await panelPage.keyboard.press('Enter');
+  await sleep(120);
+  const thirdStep = await panelPage.evaluate(() => ({
+    op: document.querySelector('#detail-head .op-name').textContent,
+    activeHits: document.querySelectorAll('.sr-hit.active').length
+  }));
+  check('Enter steps through hits', firstStep === 'GetUser' && thirdStep.op === 'ListJobs' && thirdStep.activeHits === 1, [firstStep, thirdStep]);
+
+  await panelPage.keyboard.press('Escape');
+  const closed = await panelPage.evaluate(() => ({
+    search: document.getElementById('search-pane').classList.contains('hidden'),
+    list: !document.getElementById('list-pane').classList.contains('hidden')
+  }));
+  check('Escape closes search and restores the list', closed.search && closed.list, closed);
+  check('no panel page errors while searching', panelErrors.length === 0, panelErrors);
+  await panelPage.close();
+
+  console.log('\n[15] no fatal page errors');
   const gqlopErr = pageErrors.filter((e) => /GQLOP is not defined/.test(e));
   check('no "GQLOP is not defined" errors', gqlopErr.length === 0, gqlopErr);
   check('no uncaught page errors at all', pageErrors.length === 0, pageErrors);
