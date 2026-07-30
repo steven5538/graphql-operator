@@ -12,3 +12,6 @@ playwright-report/
 # OS / editor cruft
 .DS_Store
 *.log
+
+# Generated against a private registry — do not commit; run `npm install` locally
+package-lock.json
