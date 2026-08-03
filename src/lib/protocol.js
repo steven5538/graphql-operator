@@ -27,6 +27,7 @@
     // content bridge -> page
     P_RULES: 'rules-update',
     P_RESEND: 'resend',
+    P_ACTIVE: 'set-active', // install/remove the fetch+XHR hooks (see below)
 
     // ---- runtime port names ----
     PORT_CONTENT: 'gqlop-content-port', // content bridge <-> background
@@ -41,6 +42,7 @@
     M_RESEND_RESULT: 'resend-result', // content -> bg -> devtools: replay outcome
     M_BUFFER: 'buffer', // bg -> devtools: replay of buffered events on connect
     M_CLEAR_BUFFER: 'clear-buffer', // bg -> devtools: inspected page navigated
+    M_PANEL_STATE: 'panel-state', // bg -> content: is a panel watching this tab?
 
     // ---- chrome.storage keys ----
     STORAGE_RULES: 'gqlop_rules',

@@ -16,6 +16,7 @@
   --purple: #8250df;
   --teal: #0e7490;
   --gray: #8b949e;
+  --dup: #c2410c;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
@@ -36,6 +37,7 @@
     --purple: #cba6f7;
     --teal: #56d4dd;
     --gray: #9aa0a6;
+    --dup: #ff9f5a;
   }
 }
 
@@ -54,7 +56,7 @@ code { font-family: var(--mono); background: var(--bg-3); padding: 0 3px; border
 
 /* toolbar */
 #toolbar {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 6px 8px; border-bottom: 1px solid var(--border);
   background: var(--bg-2); flex: 0 0 auto;
 }
@@ -69,7 +71,7 @@ code { font-family: var(--mono); background: var(--bg-3); padding: 0 3px; border
 .tcheck { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
 .tcheck.inline { white-space: nowrap; }
 #filter {
-  flex: 0 1 320px; font: inherit; padding: 4px 8px;
+  flex: 1 1 150px; max-width: 320px; font: inherit; padding: 4px 8px;
   border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text);
 }
 .count { color: var(--muted); }
@@ -102,7 +104,7 @@ code { font-family: var(--mono); background: var(--bg-3); padding: 0 3px; border
 .sopt.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 #btn-search.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 #search-nav-hint { font-size: 11px; }
-#search-pane { flex: 1 1 58%; overflow: auto; position: relative; border-right: 1px solid var(--border); }
+#search-pane { flex: 0 0 58%; overflow: auto; position: relative; }
 #search-error { margin: 8px; }
 .sr-group { border-bottom: 1px solid var(--border); padding-bottom: 3px; }
 .sr-head {
@@ -125,10 +127,21 @@ code { font-family: var(--mono); background: var(--bg-3); padding: 0 3px; border
 .cv-row.cv-active { outline: 1px solid var(--accent); outline-offset: -1px; }
 table.kv tr.kv-match { background: color-mix(in srgb, var(--amber) 28%, transparent); }
 
-/* split */
+/* split — the divider is draggable; panel.js keeps both list panes on the same
+   flex-basis so the width survives toggling the search pane */
 #split { flex: 1; display: flex; min-height: 0; }
-#list-pane { flex: 1 1 58%; overflow: auto; position: relative; border-right: 1px solid var(--border); }
-#detail-pane { flex: 1 1 42%; overflow: auto; min-width: 320px; }
+#list-pane { flex: 0 0 58%; overflow: auto; position: relative; }
+#detail-pane { flex: 1 1 0; overflow: auto; min-width: 260px; }
+#splitter { flex: 0 0 5px; position: relative; cursor: col-resize; background: none; }
+#splitter::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 1px;
+  background: var(--border);
+}
+#splitter:hover::after, #splitter:focus-visible::after, #splitter.dragging::after {
+  background: var(--accent); width: 2px;
+}
+#splitter:focus { outline: none; }
+body.resizing { cursor: col-resize; user-select: none; }
 
 /* table */
 #op-table { width: 100%; border-collapse: collapse; }
@@ -166,6 +179,31 @@ table.kv tr.kv-match { background: color-mix(in srgb, var(--amber) 28%, transpar
 .tag.rewritten { color: var(--amber); border-color: var(--amber); }
 .tag.delayed { color: var(--teal); border-color: var(--teal); }
 .tag.xhr { color: var(--teal); }
+
+/* duplicate calls — same query + variables, fired inside the dup window */
+.tag.dup { color: var(--dup); border-color: var(--dup); font-weight: 600; }
+#op-rows tr.dup td:first-child { box-shadow: inset 3px 0 0 var(--dup); }
+#op-rows tr.dup:not(.selected) { background: color-mix(in srgb, var(--dup) 11%, transparent); }
+#op-rows tr.dup:not(.selected):hover { background: color-mix(in srgb, var(--dup) 20%, transparent); }
+#toolbar .chip[data-f="dupes"].active { background: var(--dup); border-color: var(--dup); }
+#dup-window {
+  font: inherit; font-size: 11px; padding: 1px 2px; cursor: pointer; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-3);
+}
+#dup-window:hover { color: var(--text); }
+.dup-warn {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+  font-size: 11px; color: var(--dup);
+}
+.dup-badge {
+  font-family: var(--mono); font-weight: 600; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--dup); flex: 0 0 auto;
+}
+.dup-link {
+  font: inherit; font-size: 11px; color: var(--dup); background: none;
+  border: 1px solid var(--dup); border-radius: 4px; padding: 0 5px; cursor: pointer;
+}
+.dup-link:hover { background: var(--dup); color: var(--bg); }
 
 /* foldable code viewer */
 .codeview {

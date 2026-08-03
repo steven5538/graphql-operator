@@ -10,7 +10,7 @@
 - [ ] Set up the developer contact email and verify it (required before publishing).
 
 ## 2. Package
-- [ ] Build the upload zip (already produced): `graphql-operator-v1.1.0.zip`.
+- [ ] Build the upload zip (already produced): `graphql-operator-v1.2.0.zip`.
       Rebuild after any change with:
       ```bash
       rm -f graphql-operator-v*.zip

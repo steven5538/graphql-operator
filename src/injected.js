@@ -9,6 +9,13 @@
  *
  * It cannot use chrome.* APIs (wrong world), so it talks to content-bridge.js
  * exclusively through window.postMessage, tagged with GQLOP.SRC_PAGE.
+ *
+ * It starts DORMANT and hooks nothing until content-bridge.js says a panel is
+ * watching this tab or an enabled rule exists (P_ACTIVE). A hook left installed
+ * sits on the call stack of every request the page makes, which makes Chrome
+ * attribute the *page's own* CSP violations and network errors to this
+ * extension in chrome://extensions. Dormant means genuinely absent:
+ * `window.fetch` is the native function again.
  */
 (function () {
   'use strict';
@@ -27,7 +34,8 @@
     P_RECORD_UPDATE: 'record-update',
     P_RESEND_RESULT: 'resend-result',
     P_RULES: 'rules-update',
-    P_RESEND: 'resend'
+    P_RESEND: 'resend',
+    P_ACTIVE: 'set-active'
   };
 
   var origFetch = window.fetch ? window.fetch.bind(window) : null;
@@ -66,6 +74,10 @@
   // subject to block/rewrite rules.
   var rules = [];
 
+  // Whether the fetch/XHR hooks are installed. Starts false: content-bridge.js
+  // turns us on only when a panel is watching or an enabled rule exists.
+  var active = false;
+
   // ---- messaging to the content bridge -----------------------------------
   function postToContent(type, payload) {
     try {
@@ -81,6 +93,8 @@
     if (!d || d.__gqlop !== true || d.source !== GQLOP.SRC_CONTENT) return;
     if (d.type === GQLOP.P_RULES) {
       rules = Array.isArray(d.payload) ? d.payload : [];
+    } else if (d.type === GQLOP.P_ACTIVE) {
+      setActive(d.payload && d.payload.active);
     } else if (d.type === GQLOP.P_RESEND) {
       doResend(d.payload);
     }
@@ -297,14 +311,13 @@
   // ======================================================================
   //  fetch patch
   // ======================================================================
-  if (origFetch) {
-    window.fetch = function (input, init) {
-      try {
-        return handleFetch(input, init);
-      } catch (e) {
-        return origFetch(input, init); // fail open: never break the page
-      }
-    };
+  function patchedFetch(input, init) {
+    if (!active) return origFetch(input, init); // dormant, or we could not unhook
+    try {
+      return handleFetch(input, init);
+    } catch (e) {
+      return origFetch(input, init); // fail open: never break the page
+    }
   }
 
   function handleFetch(input, init) {
@@ -477,17 +490,18 @@
   var origSend = XProto.send;
   var origSetHeader = XProto.setRequestHeader;
 
-  XProto.open = function (method, url) {
-    this.__gqlop = { method: (method || 'GET').toUpperCase(), url: String(url), headers: {} };
+  function patchedOpen(method, url) {
+    if (active) this.__gqlop = { method: (method || 'GET').toUpperCase(), url: String(url), headers: {} };
     return origOpen.apply(this, arguments);
-  };
+  }
 
-  XProto.setRequestHeader = function (name, value) {
+  function patchedSetHeader(name, value) {
     if (this.__gqlop) this.__gqlop.headers[name] = value;
     return origSetHeader.apply(this, arguments);
-  };
+  }
 
-  XProto.send = function (body) {
+  function patchedSend(body) {
+    if (!active) return origSend.apply(this, arguments);
     var info = this.__gqlop;
     var modifiedBody = null; // set only when we actually rewrite the body
     var delayMs = 0;
@@ -577,7 +591,31 @@
     }
     if (modifiedBody !== null) return origSend.call(this, finalBody);
     return origSend.apply(this, arguments);
-  };
+  }
+
+  // ======================================================================
+  //  Hook installation — off until content-bridge.js says otherwise
+  // ======================================================================
+  function setActive(next) {
+    next = !!next;
+    if (next === active) return;
+    active = next;
+    if (next) {
+      if (origFetch) window.fetch = patchedFetch;
+      XProto.open = patchedOpen;
+      XProto.setRequestHeader = patchedSetHeader;
+      XProto.send = patchedSend;
+    } else {
+      // Restore only what is still ours. If a page library wrapped us in the
+      // meantime, its wrapper stays and the `active` checks above turn ours
+      // into a pass-through instead.
+      if (origFetch && window.fetch === patchedFetch) window.fetch = origFetch;
+      if (XProto.open === patchedOpen) XProto.open = origOpen;
+      if (XProto.setRequestHeader === patchedSetHeader) XProto.setRequestHeader = origSetHeader;
+      if (XProto.send === patchedSend) XProto.send = origSend;
+    }
+    debug(next ? 'interception ON' : 'interception OFF (dormant — native fetch restored)');
+  }
 
   // ======================================================================
   //  Resend (triggered from the panel)
@@ -632,5 +670,5 @@
     });
   }
 
-  debug('interceptor installed on', location.href, '· fetch patched:', !!origFetch);
+  debug('interceptor loaded (dormant) on', location.href, '· fetch hookable:', !!origFetch);
 })();

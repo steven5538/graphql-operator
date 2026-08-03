@@ -35,6 +35,13 @@ function pushBuffer(entry, event) {
   if (entry.buffer.length > BUFFER_MAX) entry.buffer.shift();
 }
 
+// The page only patches fetch/XHR while something needs it (see injected.js), so
+// every frame of a tab has to be told when a panel starts or stops watching.
+function broadcastPanelState(entry) {
+  var attached = !!entry.devtools;
+  entry.contentByFrame.forEach(function (p) { post(p, { type: GQLOP.M_PANEL_STATE, attached: attached }); });
+}
+
 chrome.runtime.onConnect.addListener(function (port) {
   if (port.name === GQLOP.PORT_CONTENT) handleContent(port);
   else if (port.name === GQLOP.PORT_DEVTOOLS) handleDevtools(port);
@@ -47,6 +54,8 @@ function handleContent(port) {
   var frameId = sender.frameId || 0;
   var entry = entryFor(tabId);
   entry.contentByFrame.set(frameId, port);
+  // Answer immediately: a frame starting up must learn whether to hook at all.
+  post(port, { type: GQLOP.M_PANEL_STATE, attached: !!entry.devtools });
 
   port.onMessage.addListener(function (msg) {
     if (!msg) return;
@@ -88,6 +97,7 @@ function handleDevtools(port) {
       var entry = entryFor(tabId);
       entry.devtools = port;
       post(port, { type: GQLOP.M_BUFFER, events: entry.buffer });
+      broadcastPanelState(entry); // wake the interceptor in the inspected page
     } else if (msg.type === GQLOP.M_RESEND) {
       var e = entryFor(msg.tabId != null ? msg.tabId : tabId);
       var fid = (msg.payload && msg.payload.frameId) || 0;
@@ -109,7 +119,10 @@ function handleDevtools(port) {
   port.onDisconnect.addListener(function () {
     if (tabId != null) {
       var entry = tabs.get(tabId);
-      if (entry && entry.devtools === port) entry.devtools = null;
+      if (entry && entry.devtools === port) {
+        entry.devtools = null;
+        broadcastPanelState(entry); // nothing is watching — let the page unhook
+      }
     }
   });
 }

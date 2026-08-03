@@ -31,6 +31,14 @@ function startServer() {
   return new Promise((resolve) => {
     const received = [];
     const server = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/csp')) {
+        // Stands in for a real app whose CSP blocks a third-party tracker.
+        res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': "connect-src 'self'" });
+        res.end(`<!doctype html><html><body><script>
+          window.fireBlocked = function () { return fetch('http://127.0.0.1:9/tracker/ip.json').catch(function () { return 'blocked'; }); };
+        </script></body></html>`);
+        return;
+      }
       if (req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.end(PAGE_HTML);
@@ -165,6 +173,32 @@ async function setRules(sw, rules) {
 
   await page.goto(base + '/', { waitUntil: 'load' });
 
+  // The interceptor is dormant until something needs it, so stand in for an open
+  // DevTools panel for the whole run: an extension page holding the same port
+  // the real panel uses, collecting forwarded records for every tab.
+  // (Section [16] covers the dormant case on purpose.)
+  const dtPage = await context.newPage();
+  await dtPage.goto('chrome-extension://' + extId + '/src/popup.html', { waitUntil: 'load' });
+  await dtPage.evaluate(() => new Promise((resolve) => {
+    window.__got = [];
+    chrome.tabs.query({}, (tabs) => {
+      window.__ports = tabs.map((t) => {
+        const p = chrome.runtime.connect({ name: 'gqlop-devtools-port' });
+        p.onMessage.addListener((m) => {
+          if (m.type === 'record') window.__got.push(m.record);
+          else if (m.type === 'buffer') (m.events || []).forEach((e) => { if (e.kind === 'record') window.__got.push(e.record); });
+        });
+        p.postMessage({ type: 'init', tabId: t.id });
+        return p;
+      });
+      resolve(tabs.map((t) => t.id));
+    });
+  }));
+  await sleep(300); // let the ports register and the page install its hooks
+  await page.bringToFront();
+  const wokeOnAttach = await page.evaluate(() => !/native code/.test(String(window.fetch)));
+  check('attaching a panel hooks the already-loaded page (no reload needed)', wokeOnAttach);
+
   console.log('\n[2] records a normal fetch GraphQL operation');
   const resp1 = await page.evaluate(() => window.fireFetch('GetJobs', { id: 1 }));
   const r1 = await pollRecords(page, (r) => r.type === 'record' && r.payload.operationName === 'GetJobs');
@@ -210,26 +244,6 @@ async function setRules(sw, rules) {
   check('XHR server received request', xhrResp && xhrResp.data && xhrResp.data.echo.operationName === 'XhrMutation');
 
   console.log('\n[7] records reach a DevTools-style consumer (content -> background -> panel)');
-  // Stand in for the panel: an extension page that opens the same port the panel
-  // uses and collects forwarded records for every tab.
-  const dtPage = await context.newPage();
-  await dtPage.goto('chrome-extension://' + extId + '/src/popup.html', { waitUntil: 'load' });
-  await dtPage.evaluate(() => new Promise((resolve) => {
-    window.__got = [];
-    chrome.tabs.query({}, (tabs) => {
-      window.__ports = tabs.map((t) => {
-        const p = chrome.runtime.connect({ name: 'gqlop-devtools-port' });
-        p.onMessage.addListener((m) => {
-          if (m.type === 'record') window.__got.push(m.record);
-          else if (m.type === 'buffer') (m.events || []).forEach((e) => { if (e.kind === 'record') window.__got.push(e.record); });
-        });
-        p.postMessage({ type: 'init', tabId: t.id });
-        return p;
-      });
-      resolve(tabs.map((t) => t.id));
-    });
-  }));
-  await sleep(200); // let ports register in the background
   await page.bringToFront();
   await page.evaluate(() => window.fireFetch('PanelPipelineOp', { x: 9 }));
   let forwarded = [];
@@ -504,7 +518,446 @@ async function setRules(sw, rules) {
   check('no panel page errors while searching', panelErrors.length === 0, panelErrors);
   await panelPage.close();
 
-  console.log('\n[15] no fatal page errors');
+  console.log('\n[15] duplicate detection: library + panel highlighting');
+  const dPage = await context.newPage();
+  const dupErrors = [];
+  dPage.on('pageerror', (e) => dupErrors.push(String(e)));
+  await dPage.goto('about:blank');
+  await dPage.addScriptTag({ path: EXT + '/src/lib/dupes.js' });
+  const dl = await dPage.evaluate(() => {
+    const mk = (id, ts, vars, name, extra) => Object.assign({
+      id, ts, url: '/graphql', method: 'POST',
+      entries: [{ operationName: name || 'GetJobs', query: 'query ' + (name || 'GetJobs') + ' { field }', variables: vars }]
+    }, extra || {});
+    const sig = (q, vars) => GQLDupes.signature({ url: '/g', method: 'POST', entries: [{ operationName: 'A', query: q, variables: vars }] });
+
+    const inWindow = GQLDupes.analyze([mk('1', 1000, { x: 1 }), mk('2', 1300, { x: 1 })], 1000);
+    const outWindow = GQLDupes.analyze([mk('1', 1000, { x: 1 }), mk('2', 3000, { x: 1 })], 1000);
+    const diffVars = GQLDupes.analyze([mk('1', 1000, { x: 1 }), mk('2', 1100, { x: 2 })], 1000);
+    const diffOp = GQLDupes.analyze([mk('1', 1000, {}, 'A'), mk('2', 1100, {}, 'B')], 1000);
+    const resend = GQLDupes.analyze([mk('1', 1000, {}), mk('2', 1100, {}, null, { isResent: true })], 1000);
+    // anchored to the first of the run: 0,400,800 group; 1200,1600 start a new one
+    const burst = GQLDupes.analyze([mk('1', 0, {}), mk('2', 400, {}), mk('3', 800, {}), mk('4', 1200, {}), mk('5', 1600, {})], 1000);
+    const unordered = GQLDupes.analyze([mk('2', 1300, {}), mk('1', 1000, {})], 1000);
+    return {
+      inWindow: inWindow.dupCount, outWindow: outWindow.dupCount,
+      diffVars: diffVars.dupCount, diffOp: diffOp.dupCount, resend: resend.dupCount,
+      first: inWindow.info['1'], second: inWindow.info['2'],
+      burstGroups: burst.groups, burstFirstSize: burst.info['1'].size, burstTailSize: burst.info['4'].size,
+      orderedIndex: unordered.info['1'].index, orderedGap: unordered.info['2'].gapMs,
+      fmtSame: sig('query A{b}', { y: 2, x: 1 }) === sig('query A  {\n  b\n}', { x: 1, y: 2 }),
+      fieldDiff: sig('query A{b}', {}) !== sig('query A{c}', {}),
+      widened: GQLDupes.analyze([mk('1', 1000, {}), mk('2', 3000, {})], 5000).dupCount
+    };
+  });
+  check('identical calls inside the window are duplicates', dl.inWindow === 2, dl.inWindow);
+  check('same call outside the window is not', dl.outWindow === 0, dl.outWindow);
+  check('different variables are not duplicates', dl.diffVars === 0, dl.diffVars);
+  check('different operations are not duplicates', dl.diffOp === 0, dl.diffOp);
+  check('user resends are excluded', dl.resend === 0, dl.resend);
+  check('reports position, size and gap', dl.first.index === 1 && dl.first.size === 2 && dl.second.index === 2 && dl.second.gapMs === 300, [dl.first, dl.second]);
+  check('a burst clusters from its first call, not endlessly', dl.burstGroups === 2 && dl.burstFirstSize === 3 && dl.burstTailSize === 2, dl);
+  check('out-of-order arrivals are ordered by timestamp', dl.orderedIndex === 1 && dl.orderedGap === 300, dl);
+  check('query formatting and key order do not affect the signature', dl.fmtSame);
+  check('but a different field does', dl.fieldDiff);
+  check('widening the window catches a farther-apart pair', dl.widened === 2, dl.widened);
+  await dPage.close();
+
+  const dupPanel = await context.newPage();
+  const dupPanelErrors = [];
+  dupPanel.on('pageerror', (e) => dupPanelErrors.push(String(e)));
+  await dupPanel.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: 999998 } }; } catch (e) {}
+  });
+  await dupPanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+
+  const T0 = 1700000000000;
+  const dupOp = (id, ts, vars, name) => ({
+    id, operationName: name || 'GetJobs', operationType: 'query', method: 'POST',
+    url: 'https://ex.test/graphql', status: 200, ts,
+    entries: [{ operationName: name || 'GetJobs', query: 'query ' + (name || 'GetJobs') + ' { jobs { id } }', variables: vars }]
+  });
+  await dupPanel.setInputFiles('#import-file', {
+    name: 'dupes.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      tool: 'graphql-operator', version: 1,
+      operations: [
+        dupOp('d1', T0, { page: 1 }),          // \ identical, 300 ms apart
+        dupOp('d2', T0 + 300, { page: 1 }),    // /
+        dupOp('d3', T0 + 400, { page: 2 }),    // same query, different variables
+        dupOp('d4', T0 + 4000, { page: 1 }),   // same as d1/d2 but far apart
+        dupOp('d5', T0 + 500, {}, 'Unrelated')
+      ]
+    }))
+  });
+  await dupPanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 5);
+
+  const dupUi = await dupPanel.evaluate(() => {
+    const row = (id) => document.querySelector('#op-rows tr[data-id="' + id + '"]');
+    const marked = Array.prototype.map.call(document.querySelectorAll('#op-rows tr.dup'), (t) => t.getAttribute('data-id'));
+    const tag = row('d1').querySelector('.tag.dup');
+    const bg = getComputedStyle(row('d1')).backgroundColor;
+    const plainBg = getComputedStyle(row('d3')).backgroundColor;
+    return {
+      marked, tagText: tag && tag.textContent,
+      tagTitle: tag && tag.title,
+      secondTagTitle: row('d2').querySelector('.tag.dup').title,
+      chip: document.getElementById('chip-dupes-n').textContent,
+      tinted: bg !== plainBg && bg !== 'rgba(0, 0, 0, 0)',
+      bar: getComputedStyle(row('d1').querySelector('td')).boxShadow
+    };
+  });
+  check('only the two identical close-together calls are flagged', dupUi.marked.join(',') === 'd1,d2', dupUi.marked);
+  check('flagged rows carry a dup ×N tag', dupUi.tagText === 'dup ×2', dupUi.tagText);
+  check('the tag names the window and position', /2 identical calls within 1s — this is #1$/.test(dupUi.tagTitle || ''), dupUi.tagTitle);
+  check('the tag explains the gap to the previous call', /this is #2, 300 ms after the previous one/.test(dupUi.secondTagTitle || ''), dupUi.secondTagTitle);
+  check('flagged rows are colour-tinted', dupUi.tinted, dupUi.tinted);
+  check('flagged rows get a coloured edge bar', /rgb/.test(dupUi.bar) && dupUi.bar !== 'none', dupUi.bar);
+  check('the Dupes chip counts them', dupUi.chip === '2', dupUi.chip);
+
+  await dupPanel.click('#op-rows tr[data-id="d2"]');
+  const dupDetail = await dupPanel.evaluate(() => ({
+    warn: (document.querySelector('#detail-head .dup-warn') || {}).textContent,
+    links: document.querySelectorAll('#detail-head .dup-link').length,
+    meta: Array.prototype.map.call(document.querySelectorAll('.tabpane[data-pane="meta"] tr'), (t) => t.textContent).filter((t) => /^Duplicate/.test(t))[0]
+  }));
+  check('the detail pane warns about the duplicate', /2 identical calls/.test(dupDetail.warn || '') && /#2/.test(dupDetail.warn || ''), dupDetail.warn);
+  check('the warning links to the sibling call', dupDetail.links === 1, dupDetail.links);
+  check('the Timing tab records the duplicate position', /#2 of 2/.test(dupDetail.meta || ''), dupDetail.meta);
+  await dupPanel.click('#detail-head .dup-link');
+  const jumpedToSibling = await dupPanel.evaluate(() => (document.querySelector('#op-rows tr.selected') || {}).getAttribute('data-id'));
+  check('clicking the link selects the sibling call', jumpedToSibling === 'd1', jumpedToSibling);
+
+  await dupPanel.click('#toolbar .chip[data-f="dupes"]');
+  const filtered = await dupPanel.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#op-rows tr'), (t) => t.getAttribute('data-id')));
+  check('the Dupes filter shows only duplicates', filtered.join(',') === 'd1,d2', filtered);
+
+  // widening the window should pull in d4, which is 4s after d1
+  await dupPanel.selectOption('#dup-window', '5000');
+  const widened = await dupPanel.evaluate(() => ({
+    rows: Array.prototype.map.call(document.querySelectorAll('#op-rows tr'), (t) => t.getAttribute('data-id')),
+    chip: document.getElementById('chip-dupes-n').textContent,
+    tag: (document.querySelector('#op-rows tr[data-id="d1"] .tag.dup') || {}).textContent
+  }));
+  check('widening the window re-clusters live', widened.rows.join(',') === 'd1,d2,d4' && widened.chip === '3', widened);
+  check('the tag count follows the new cluster size', widened.tag === 'dup ×3', widened.tag);
+  await dupPanel.selectOption('#dup-window', '250');
+  const narrowed = await dupPanel.evaluate(() => ({
+    rows: document.querySelectorAll('#op-rows tr').length,
+    chip: document.getElementById('chip-dupes-n').textContent
+  }));
+  check('narrowing below the gap clears the duplicates', narrowed.rows === 0 && narrowed.chip === '0', narrowed);
+  await dupPanel.selectOption('#dup-window', '1000');
+
+  await dupPanel.click('#toolbar .chip[data-f="all"]');
+  const backToAll = await dupPanel.evaluate(() => document.querySelectorAll('#op-rows tr').length);
+  check('switching back to All restores every row', backToAll === 5, backToAll);
+  check('no panel page errors while detecting duplicates', dupPanelErrors.length === 0, dupPanelErrors);
+  check('no errors in the dupes library page', dupErrors.length === 0, dupErrors);
+  await dupPanel.close();
+
+  // The checks above drive the panel from an imported file. This one runs the
+  // real thing: a page double-firing a query, through injected -> background ->
+  // panel, with the panel bound to the actual inspected tab.
+  await page.bringToFront();
+  const liveTabId = await sw.evaluate(() => new Promise((res) =>
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (t) => res(t[0] && t[0].id))));
+  check('found the inspected tab for the live check', liveTabId != null, liveTabId);
+  const livePanel = await context.newPage();
+  const liveErrors = [];
+  livePanel.on('pageerror', (e) => liveErrors.push(String(e)));
+  await livePanel.addInitScript((id) => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: id } }; } catch (e) {}
+  }, liveTabId);
+  await livePanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+  await livePanel.click('#btn-clear'); // drop whatever the earlier sections recorded
+  await sleep(300);
+  await page.evaluate(() => { window.fireFetch('DoubleFetch', { page: 1 }); window.fireFetch('DoubleFetch', { page: 1 }); });
+  let live = { rows: 0 };
+  for (let i = 0; i < 40; i++) {
+    live = await livePanel.evaluate(() => ({
+      rows: document.querySelectorAll('#op-rows tr').length,
+      dupRows: document.querySelectorAll('#op-rows tr.dup').length,
+      chip: document.getElementById('chip-dupes-n').textContent
+    }));
+    if (live.rows >= 2 && live.dupRows >= 2) break;
+    await sleep(100);
+  }
+  check('a page double-firing one query is flagged on the live path', live.rows === 2 && live.dupRows === 2 && live.chip === '2', live);
+  // and a genuinely different call recorded right after must stay unflagged
+  await page.evaluate(() => window.fireFetch('DoubleFetch', { page: 2 }));
+  await livePanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 3, null, { timeout: 8000 });
+  const liveMixed = await livePanel.evaluate(() => document.querySelectorAll('#op-rows tr.dup').length);
+  check('a different-variables call beside them stays unflagged', liveMixed === 2, liveMixed);
+  check('no panel errors on the live path', liveErrors.length === 0, liveErrors);
+  await livePanel.close();
+
+  console.log('\n[16] stays out of the way when nothing needs it');
+  // A hook left installed sits on the call stack of every request the page makes,
+  // which makes Chrome file the PAGE's own CSP violations under this extension.
+  await setRules(sw, []);
+  const idle = await context.newPage();
+  const idleErrors = [];
+  idle.on('pageerror', (e) => idleErrors.push(String(e)));
+  await idle.goto(base + '/', { waitUntil: 'load' });
+  await sleep(500);
+  const dormant = await idle.evaluate(() => ({
+    fetch: /native code/.test(String(window.fetch)),
+    send: /native code/.test(String(XMLHttpRequest.prototype.send)),
+    open: /native code/.test(String(XMLHttpRequest.prototype.open))
+  }));
+  check('fetch and XHR are left untouched while no panel watches and no rule exists',
+    dormant.fetch && dormant.send && dormant.open, dormant);
+  await idle.evaluate(() => window.fireFetch('DormantOp', {}));
+  await sleep(400);
+  const idleRecs = await idle.evaluate(() => window.__records.filter((r) => r.type === 'record').map((r) => r.payload.operationName));
+  check('and nothing is recorded', idleRecs.length === 0, idleRecs);
+
+  // The point of all this: Chrome blames the top-most script frame for a CSP
+  // violation. With a hook installed that frame is injected.js, so the page's
+  // own blocked requests get filed under this extension in chrome://extensions.
+  const cspPage = await context.newPage();
+  const cspBlamed = [];
+  cspPage.on('console', (m) => {
+    if (m.type() === 'error' && /Content Security Policy|violates the following/.test(m.text())) {
+      cspBlamed.push(m.location().url || '');
+    }
+  });
+  await cspPage.goto(base + '/csp', { waitUntil: 'load' });
+  await sleep(300);
+  await cspPage.evaluate(() => window.fireBlocked());
+  await sleep(500);
+  check('the page CSP actually blocked the request (fixture is valid)', cspBlamed.length > 0, cspBlamed.length);
+  check('a page CSP violation is blamed on the page, not on this extension',
+    cspBlamed.every((u) => u.indexOf('chrome-extension://') !== 0), cspBlamed);
+  await cspPage.close();
+
+  // an enabled rule alone must still hook, so rules work with DevTools closed
+  await setRules(sw, [{ id: 'wake', type: 'block', enabled: true, match: { operationName: 'NeverFired' } }]);
+  await sleep(500);
+  const byRule = await idle.evaluate(() => !/native code/.test(String(window.fetch)));
+  check('an enabled rule alone is enough to hook', byRule);
+  await setRules(sw, []);
+  await sleep(500);
+  const afterRuleRemoved = await idle.evaluate(() => /native code/.test(String(window.fetch)));
+  check('removing the last rule unhooks again', afterRuleRemoved);
+
+  // a panel attaching must wake it, and detaching must put it back
+  await idle.bringToFront();
+  const idleTabId = await sw.evaluate(() => new Promise((res) =>
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (t) => res(t[0] && t[0].id))));
+  const waker = await context.newPage();
+  await waker.goto('chrome-extension://' + extId + '/src/popup.html', { waitUntil: 'load' });
+  await waker.evaluate((id) => {
+    window.__p = chrome.runtime.connect({ name: 'gqlop-devtools-port' });
+    window.__p.postMessage({ type: 'init', tabId: id });
+  }, idleTabId);
+  await sleep(400);
+  const wokeUp = await idle.evaluate(() => !/native code/.test(String(window.fetch)));
+  check('a panel attaching hooks the page', wokeUp);
+  await idle.evaluate(() => window.fireFetch('WokeUpOp', {}));
+  const wokeRec = await pollRecords(idle, (r) => r.type === 'record' && r.payload.operationName === 'WokeUpOp');
+  check('and recording resumes immediately', wokeRec.hit.length > 0);
+  await waker.close();
+  await sleep(600);
+  const unhooked = await idle.evaluate(() => ({
+    fetch: /native code/.test(String(window.fetch)),
+    send: /native code/.test(String(XMLHttpRequest.prototype.send))
+  }));
+  check('closing the panel restores the native fetch and XHR', unhooked.fetch && unhooked.send, unhooked);
+  check('no page errors from installing/removing the hooks', idleErrors.length === 0, idleErrors);
+  await idle.close();
+
+  console.log('\n[17] panel UI: block/unblock from the list + resizable divider');
+  await setRules(sw, []);
+  const uiPanel = await context.newPage();
+  const uiErrors = [];
+  uiPanel.on('pageerror', (e) => uiErrors.push(String(e)));
+  await uiPanel.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: 999997 } }; } catch (e) {}
+  });
+  await uiPanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+
+  const uiOp = (id, name) => ({
+    id, operationName: name, operationType: 'query', method: 'POST', url: 'https://ex.test/graphql', status: 200, ts: 1700000000000,
+    entries: [{ operationName: name, query: 'query ' + name + ' { field }', variables: {} }]
+  });
+  await uiPanel.setInputFiles('#import-file', {
+    name: 'ops.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({ tool: 'graphql-operator', version: 1, operations: [uiOp('u1', 'GetUser'), uiOp('u2', 'ListJobs')] }))
+  });
+  await uiPanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 2);
+
+  // The menu is positioned at the cursor, so it can cover the row it came from —
+  // dismiss it before opening the next one.
+  async function ctxMenu(id) {
+    await uiPanel.keyboard.press('Escape');
+    await uiPanel.click('#op-rows tr[data-id="' + id + '"]', { button: 'right' });
+    return uiPanel.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#ctx-menu button'), (b) => b.textContent));
+  }
+  function ctxClick(prefix) {
+    return uiPanel.evaluate((p) => {
+      const b = Array.prototype.filter.call(document.querySelectorAll('#ctx-menu button'), (x) => x.textContent.indexOf(p) === 0)[0];
+      if (!b) return false;
+      b.click();
+      return true;
+    }, prefix);
+  }
+  const getRules = () => sw.evaluate(() => new Promise((res) => chrome.storage.local.get('gqlop_rules', (r) => res(r.gqlop_rules || []))));
+  async function waitRules(pred, timeout = 4000) {
+    const start = Date.now();
+    let rs = [];
+    while (Date.now() - start < timeout) {
+      rs = await getRules();
+      if (pred(rs)) return rs;
+      await sleep(100);
+    }
+    return rs;
+  }
+  // The panel only relabels the menu once the storage change has reached it.
+  async function waitCtxLabel(id, re, timeout = 4000) {
+    const start = Date.now();
+    let labels = [];
+    while (Date.now() - start < timeout) {
+      labels = await ctxMenu(id);
+      if (labels.some((l) => re.test(l))) return labels;
+      await sleep(100);
+    }
+    return labels;
+  }
+  // Confirms the panel itself has the rule set (the badge only counts enabled ones).
+  async function waitPanelRuleCount(n, timeout = 4000) {
+    const start = Date.now();
+    await uiPanel.keyboard.press('Escape');
+    await uiPanel.click('#btn-rules');
+    let count = -1;
+    while (Date.now() - start < timeout) {
+      count = await uiPanel.evaluate(() => document.querySelectorAll('#rules-list .rule-item').length);
+      if (count === n) break;
+      await sleep(100);
+    }
+    await uiPanel.click('#rules-done');
+    return count === n;
+  }
+
+  const menu0 = await ctxMenu('u1');
+  check('an unblocked row offers Block', menu0.some((l) => l === 'Block operation "GetUser"'), menu0);
+  check('and does not offer Unblock', !menu0.some((l) => /^Unblock/.test(l)), menu0);
+
+  check('clicking Block hits the menu item', await ctxClick('Block operation'));
+  const blocked = await waitRules((rs) => rs.length === 1);
+  check('Block creates one block rule matching the operation name',
+    blocked.length === 1 && blocked[0].type === 'block' && blocked[0].enabled === true && blocked[0].match.operationName === 'GetUser', blocked);
+
+  const menu1 = await waitCtxLabel('u1', /^Unblock operation "GetUser"$/);
+  check('a blocked row offers Unblock instead', menu1.some((l) => l === 'Unblock operation "GetUser"'), menu1);
+  check('and no longer offers Block (so a second rule cannot be stacked)', !menu1.some((l) => /^Block operation/.test(l)), menu1);
+  const menuOther = await ctxMenu('u2');
+  check('a different operation is unaffected and still offers Block', menuOther.some((l) => l === 'Block operation "ListJobs"'), menuOther);
+
+  await ctxMenu('u1');
+  check('clicking Unblock hits the menu item', await ctxClick('Unblock operation'));
+  const unblocked = await waitRules((rs) => rs.length === 0);
+  check('Unblock deletes the rule the menu created', unblocked.length === 0, unblocked);
+
+  // A rule that is only switched off must be re-armed, not duplicated.
+  await setRules(sw, [{ id: 'off1', type: 'block', enabled: false, match: { operationName: 'GetUser' } }]);
+  check('panel sees the disabled rule', await waitPanelRuleCount(1));
+  const menuOff = await ctxMenu('u1');
+  check('a disabled block rule still shows Block', menuOff.some((l) => l === 'Block operation "GetUser"'), menuOff);
+  await ctxClick('Block operation');
+  const rearmed = await waitRules((rs) => rs.length === 1 && rs[0].enabled === true);
+  check('Block re-enables the existing rule instead of adding a second one',
+    rearmed.length === 1 && rearmed[0].id === 'off1' && rearmed[0].enabled === true, rearmed);
+
+  // A broader rule (regex here) could cover other operations, so Unblock only
+  // switches it off rather than throwing it away.
+  await setRules(sw, []);
+  await waitCtxLabel('u1', /^Block operation/);
+  await setRules(sw, [{ id: 'rx1', type: 'block', enabled: true, match: { nameRegex: '^Get' } }]);
+  const menuRx = await waitCtxLabel('u1', /^Unblock operation "GetUser"$/);
+  check('a regex block rule is recognised as blocking the row', menuRx.some((l) => /^Unblock/.test(l)), menuRx);
+  await ctxMenu('u1');
+  await ctxClick('Unblock operation');
+  const broadened = await waitRules((rs) => rs.length === 1 && rs[0].enabled === false);
+  check('Unblock only disables a broader rule, keeping it in the list',
+    broadened.length === 1 && broadened[0].id === 'rx1' && broadened[0].enabled === false, broadened);
+
+  // Unblocking from inside the Ruled filter must drop the row from the list.
+  await setRules(sw, [{ id: 'b9', type: 'block', enabled: true, match: { operationName: 'GetUser' } }]);
+  await waitCtxLabel('u1', /^Unblock operation/);
+  await uiPanel.keyboard.press('Escape');
+  await uiPanel.click('#toolbar .chip[data-f="ruled"]');
+  const ruledRows = await uiPanel.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#op-rows tr'), (t) => t.getAttribute('data-id')));
+  check('the Ruled filter shows the blocked operation', ruledRows.join(',') === 'u1', ruledRows);
+  await ctxMenu('u1');
+  await ctxClick('Unblock operation');
+  let ruledAfter = -1;
+  for (let i = 0; i < 40; i++) {
+    ruledAfter = await uiPanel.evaluate(() => document.querySelectorAll('#op-rows tr').length);
+    if (ruledAfter === 0) break;
+    await sleep(100);
+  }
+  check('unblocking removes the row from the Ruled filter live', ruledAfter === 0, ruledAfter);
+  await uiPanel.click('#toolbar .chip[data-f="all"]');
+  await setRules(sw, []);
+
+  // ---- the divider ----
+  const panes = () => uiPanel.evaluate(() => ({
+    left: document.getElementById('list-pane').getBoundingClientRect().width,
+    right: document.getElementById('detail-pane').getBoundingClientRect().width,
+    total: document.getElementById('split').getBoundingClientRect().width,
+    sx: document.getElementById('splitter').getBoundingClientRect().x + 2,
+    sy: document.getElementById('splitter').getBoundingClientRect().y + 60
+  }));
+  const p0 = await panes();
+  check('the divider sits between the panes at the default 58/42 split',
+    Math.abs(p0.left / p0.total * 100 - 58) < 2 && p0.sx > p0.left - 4, p0);
+
+  async function dragTo(x) {
+    const p = await panes();
+    await uiPanel.mouse.move(p.sx, p.sy);
+    await uiPanel.mouse.down();
+    await uiPanel.mouse.move(x, p.sy, { steps: 6 });
+    await uiPanel.mouse.up();
+    return panes();
+  }
+  const dragged = await dragTo(p0.sx - 150);
+  check('dragging the divider narrows the list and widens the detail pane',
+    Math.abs(dragged.left - (p0.left - 150)) < 14 && dragged.right > p0.right + 130, [p0.left, dragged.left, p0.right, dragged.right]);
+
+  await uiPanel.click('#btn-search');
+  const searchWidth = await uiPanel.evaluate(() => document.getElementById('search-pane').getBoundingClientRect().width);
+  check('the search pane inherits the same width', Math.abs(searchWidth - dragged.left) < 2, [searchWidth, dragged.left]);
+  await uiPanel.keyboard.press('Escape');
+
+  const farRight = await dragTo(p0.total + 400);
+  check('the detail pane keeps a usable minimum width', farRight.right >= 258 && farRight.right < 320, farRight);
+  const farLeft = await dragTo(-400);
+  check('so does the list pane', farLeft.left >= 218 && farLeft.left < 280, farLeft);
+
+  const keep = await dragTo(p0.sx - 200);
+  await uiPanel.reload({ waitUntil: 'load' });
+  await uiPanel.waitForSelector('#splitter');
+  const restored = await panes();
+  check('the dragged width survives a panel reload', Math.abs(restored.left - keep.left) < 4, [keep.left, restored.left]);
+
+  await uiPanel.evaluate(() => document.getElementById('splitter').focus());
+  await uiPanel.keyboard.press('Shift+ArrowRight');
+  const nudged = await panes();
+  check('arrow keys nudge the divider when it is focused',
+    Math.abs((nudged.left - restored.left) - restored.total * 0.05) < 8, [restored.left, nudged.left]);
+
+  await uiPanel.dblclick('#splitter');
+  const reset = await panes();
+  check('double-clicking the divider restores the default split', Math.abs(reset.left / reset.total * 100 - 58) < 2, reset);
+  check('no panel page errors while blocking, unblocking and resizing', uiErrors.length === 0, uiErrors);
+  await uiPanel.close();
+
+  console.log('\n[18] no fatal page errors');
   const gqlopErr = pageErrors.filter((e) => /GQLOP is not defined/.test(e));
   check('no "GQLOP is not defined" errors', gqlopErr.length === 0, gqlopErr);
   check('no uncaught page errors at all', pageErrors.length === 0, pageErrors);

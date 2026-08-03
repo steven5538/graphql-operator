@@ -98,7 +98,11 @@
     if (pendingPatches[rec.id]) { Object.assign(rec, pendingPatches[rec.id]); delete pendingPatches[rec.id]; }
     records.push(rec);
     byId[rec.id] = rec;
-    if (matchesFilter(rec)) appendRow(rec);
+    indexDup(rec);
+    // A late arrival can turn an earlier record into a duplicate, so settle the
+    // dup state (and repaint whoever changed) before this record's own row.
+    var reRendered = flushDupes();
+    if (!reRendered && matchesFilter(rec)) appendRow(rec);
     updateCount();
     updateEmpty();
     updateChips();
@@ -110,8 +114,11 @@
     if (!rec) { pendingPatches[id] = Object.assign(pendingPatches[id] || {}, patch); return; }
     Object.assign(rec, patch);
     delete searchFieldCache[id]; // body/headers may have changed — re-derive on next search
-    if (rowById[id]) updateRowCells(rec);
-    else if (matchesFilter(rec)) appendRow(rec);
+    indexDup(rec);               // a rewrite rule can change entries → new signature
+    if (!flushDupes()) {
+      if (rowById[id]) updateRowCells(rec);
+      else if (matchesFilter(rec)) appendRow(rec);
+    }
     if (selectedId === id) renderDetail(rec);
     updateChips();
     scheduleSearch();
@@ -123,6 +130,7 @@
     rowById = Object.create(null);
     pendingPatches = Object.create(null);
     searchFieldCache = Object.create(null);
+    resetDupes();
     selectedId = null;
     $('op-rows').textContent = '';
     $('detail').classList.add('hidden');
@@ -130,6 +138,107 @@
     updateCount();
     updateEmpty();
     if (searchOpen) runSearch();
+  }
+
+  // ---- duplicate detection -----------------------------------------------
+  // Flags identical calls (same URL, query and variables — see lib/dupes.js)
+  // that landed within `dupWindowMs` of each other: usually a double-firing
+  // effect or two components asking for the same thing.
+  //
+  // Records are bucketed by signature so a new arrival only re-clusters its own
+  // bucket instead of rescanning the whole log on every request.
+  var dupWindowMs = GQLDupes.DEFAULT_WINDOW_MS;
+  var dupInfo = Object.create(null);    // id -> { size, index, gapMs, ids }
+  var dupSig = Object.create(null);     // id -> signature
+  var dupBuckets = Object.create(null); // signature -> [id]
+  var dupDirty = Object.create(null);   // signature -> needs re-clustering
+  var dupChanged = [];                  // ids whose dup state moved since the last flush
+  var dupCount = 0;
+
+  function resetDupes() {
+    dupInfo = Object.create(null);
+    dupSig = Object.create(null);
+    dupBuckets = Object.create(null);
+    dupDirty = Object.create(null);
+    dupChanged = [];
+    dupCount = 0;
+  }
+
+  function dropDupInfo(id) {
+    if (!dupInfo[id]) return;
+    delete dupInfo[id];
+    dupCount--;
+    dupChanged.push(id);
+  }
+
+  // Put a record in the right signature bucket (moving it if its payload changed).
+  function indexDup(rec) {
+    var sig = GQLDupes.eligible(rec) ? GQLDupes.signature(rec) : null;
+    var old = dupSig[rec.id];
+    // Same payload as last time (the common case — a status/response patch):
+    // the clustering can't have moved, so don't dirty the bucket.
+    if (old === sig) return;
+    if (old) {
+      var bucket = dupBuckets[old].filter(function (x) { return x !== rec.id; });
+      if (bucket.length) { dupBuckets[old] = bucket; dupDirty[old] = true; }
+      else { delete dupBuckets[old]; delete dupDirty[old]; }
+      delete dupSig[rec.id];
+      dropDupInfo(rec.id); // no longer in that cluster; re-clustering won't see it
+    }
+    if (sig) {
+      dupSig[rec.id] = sig;
+      (dupBuckets[sig] = dupBuckets[sig] || []).push(rec.id);
+      dupDirty[sig] = true;
+    }
+  }
+
+  // Re-cluster every dirty bucket and repaint the rows whose badge changed.
+  // Returns true when it re-rendered the whole list (caller must not append).
+  function flushDupes() {
+    var sigs = Object.keys(dupDirty);
+    dupDirty = Object.create(null);
+    sigs.forEach(function (sig) {
+      var ids = dupBuckets[sig] || [];
+      var recs = ids.map(function (id) { return byId[id]; }).filter(Boolean);
+      var fresh = Object.create(null);
+      GQLDupes.cluster(recs, dupWindowMs).forEach(function (c) {
+        if (c.length < 2) return;
+        var part = GQLDupes.infoFor(c);
+        Object.keys(part).forEach(function (id) { fresh[id] = part[id]; });
+      });
+      recs.forEach(function (r) {
+        var was = dupInfo[r.id], now = fresh[r.id];
+        if (!was && !now) return;
+        if (was && now && was.size === now.size && was.index === now.index) { dupInfo[r.id] = now; return; }
+        if (now) { if (!was) dupCount++; dupInfo[r.id] = now; }
+        else { delete dupInfo[r.id]; dupCount--; }
+        dupChanged.push(r.id);
+      });
+    });
+
+    var changed = dupChanged;
+    dupChanged = [];
+    if (!changed.length) return false;
+    // The open detail pane carries its own duplicate banner — refresh it first,
+    // since the list rebuild below can return early.
+    if (selectedId && changed.indexOf(selectedId) !== -1 && byId[selectedId]) renderDetail(byId[selectedId]);
+    // In "Dupes" mode membership itself moved, so rebuild rather than trying to
+    // splice newly-duplicate rows back into timeline order.
+    if (filterMode === 'dupes') { reRenderList(); return true; }
+    changed.forEach(function (id) { if (rowById[id] && byId[id]) updateRowCells(byId[id]); });
+    return false;
+  }
+
+  // Window changed — every bucket has to be re-clustered.
+  function recomputeDupes() {
+    Object.keys(dupBuckets).forEach(function (sig) { dupDirty[sig] = true; });
+    if (!flushDupes()) reRenderList();
+    updateChips();
+  }
+
+  function dupTitle(d) {
+    return d.size + ' identical calls within ' + fmtMs(dupWindowMs) + ' — this is #' + d.index +
+      (d.gapMs != null ? ', ' + Math.round(d.gapMs) + ' ms after the previous one' : '');
   }
 
   // ---- filtering ---------------------------------------------------------
@@ -140,8 +249,10 @@
     return hasGraphQLErrors(rec);
   }
   // Panel-side mirror of the interceptor's rule matcher (for the "Ruled" chip).
-  function panelRuleMatches(rule, rec) {
-    if (!rule || rule.enabled === false) return false;
+  // ruleTargets ignores `enabled` on purpose: the context menu also has to find
+  // a switched-off block rule, so it can re-arm that one instead of stacking a twin.
+  function ruleTargets(rule, rec) {
+    if (!rule) return false;
     var m = rule.match || {};
     var entries = rec.entries && rec.entries.length ? rec.entries : [{ operationName: rec.operationName, operationType: rec.operationType }];
     return entries.some(function (e) {
@@ -154,12 +265,14 @@
       return has;
     });
   }
+  function panelRuleMatches(rule, rec) { return !!rule && rule.enabled !== false && ruleTargets(rule, rec); }
   function recIsRuled(rec) { return rules.some(function (r) { return panelRuleMatches(r, rec); }); }
 
   function matchesFilter(rec) {
     if (filterMode === 'errors' && !recHasError(rec)) return false;
     if (filterMode === 'mutations' && rec.operationType !== 'mutation') return false;
     if (filterMode === 'ruled' && !recIsRuled(rec)) return false;
+    if (filterMode === 'dupes' && !dupInfo[rec.id]) return false;
     if (!filterText) return true;
     var hay = (rec.operationName + ' ' + rec.operationType + ' ' + (rec.url || '') + ' ' + (rec.method || '') + ' ' + (rec.transport || '')).toLowerCase();
     return hay.indexOf(filterText) !== -1;
@@ -167,6 +280,7 @@
   function updateChips() {
     var n = records.filter(recHasError).length;
     $('chip-errors-n').textContent = String(n);
+    $('chip-dupes-n').textContent = String(dupCount);
   }
 
   function reRenderList() {
@@ -235,6 +349,9 @@
     if (rec.overridden) nameCell.appendChild(el('span', { class: 'tag overridden', text: 'mocked' }));
     if (rec.imported) nameCell.appendChild(el('span', { class: 'tag', text: 'imported' }));
     if (rec.transport === 'xhr') nameCell.appendChild(el('span', { class: 'tag xhr', text: 'xhr' }));
+    var dup = dupInfo[rec.id];
+    if (dup) nameCell.appendChild(el('span', { class: 'tag dup', text: 'dup ×' + dup.size, title: dupTitle(dup) }));
+    tr.classList.toggle('dup', !!dup);
     tr.classList.toggle('blocked', !!rec.blocked || rec.status === '(blocked)');
     nameCell.title = rec.operationName;
 
@@ -352,6 +469,8 @@
     head.textContent = '';
     head.appendChild(el('div', { class: 'op-name', text: rec.operationName }));
     head.appendChild(el('div', { class: 'op-url', text: (rec.method || '') + '  ' + (rec.url || '') }));
+    var dup = dupInfo[rec.id];
+    if (dup) head.appendChild(dupBanner(rec, dup));
 
     // request
     var reqPane = document.querySelector('.tabpane[data-pane="request"]');
@@ -405,10 +524,29 @@
       'Blocked': rec.blocked ? 'yes' : 'no',
       'Rewritten': rec.rewritten ? 'yes' : 'no',
       'Delayed': rec.delayedMs ? fmtMs(rec.delayedMs) : '—',
+      'Duplicate': dup ? ('#' + dup.index + ' of ' + dup.size + ' identical calls within ' + fmtMs(dupWindowMs)) : 'no',
       'Resent from': rec.resendOf || '—',
       'Rule id': rec.ruleId || '—',
       'Record id': rec.id
     }));
+  }
+
+  // "You sent this exact call N times" — with the siblings one click away.
+  function dupBanner(rec, d) {
+    var wrap = el('div', { class: 'dup-warn' });
+    wrap.appendChild(el('span', { class: 'dup-badge', text: 'duplicate' }));
+    wrap.appendChild(el('span', {
+      text: d.size + ' identical calls (same query & variables) within ' + fmtMs(dupWindowMs) +
+        ' — this is #' + d.index + (d.gapMs != null ? ', ' + Math.round(d.gapMs) + ' ms after the previous.' : '.')
+    }));
+    d.ids.forEach(function (id, i) {
+      if (id === rec.id) return;
+      wrap.appendChild(el('button', {
+        class: 'dup-link', text: '#' + (i + 1), title: 'Jump to call #' + (i + 1),
+        onclick: function () { selectRecord(id); }
+      }));
+    });
+    return wrap;
   }
 
   function kvTable(obj) {
@@ -535,6 +673,7 @@
       el('span', { class: 'dot ' + st.cls }),
       el('span', { class: 'sr-op', text: rec.operationName, title: rec.operationName }),
       el('span', { class: 'type-badge ' + rec.operationType, text: rec.operationType }),
+      dupInfo[rec.id] ? el('span', { class: 'tag dup', text: 'dup ×' + dupInfo[rec.id].size, title: dupTitle(dupInfo[rec.id]) }) : null,
       el('span', { class: 'muted', text: g.total + (g.total === 1 ? ' match' : ' matches') }),
       el('span', { class: 'spacer' }),
       el('span', { class: 'muted', text: rec.ts ? new Date(rec.ts).toLocaleTimeString() : '' })
@@ -674,7 +813,12 @@
     item(truncated ? 'Resend (body truncated)' : 'Resend', '', function () { resendRecord(rec); }, truncated);
     item('Modify & resend…', '', function () { openEditor(rec); }, truncated);
     sep();
-    item('Block operation "' + primary + '"', '', function () { addBlockRule(rec); });
+    // Already blocked → offer the inverse instead of a second identical rule.
+    if (blockRulesFor(rec).some(function (r) { return r.enabled !== false; })) {
+      item('Unblock operation "' + primary + '"', '', function () { removeBlockRule(rec); });
+    } else {
+      item('Block operation "' + primary + '"', '', function () { addBlockRule(rec); });
+    }
     item('Delay operation…', '', function () { openRuleEditor(null, { type: 'delay', operationName: primary, delayMs: 30000 }); });
     item('Override response…', '', function () { openRuleEditor(null, { type: 'override', operationName: primary, overrideBody: rec.responseBody || '' }); });
     item('Create rewrite rule…', '', function () { openRuleEditorFromRecord(rec); });
@@ -902,29 +1046,66 @@
   // ---- rules -------------------------------------------------------------
   function loadRules() {
     chrome.storage.local.get(GQLOP.STORAGE_RULES, function (res) {
-      rules = (res && res[GQLOP.STORAGE_RULES]) || [];
-      renderRulesBadge();
-      if (!$('rules-backdrop').classList.contains('hidden')) renderRulesList();
+      onRulesChanged((res && res[GQLOP.STORAGE_RULES]) || []);
     });
   }
   chrome.storage.onChanged.addListener(function (changes, area) {
-    if (area === 'local' && changes[GQLOP.STORAGE_RULES]) {
-      rules = changes[GQLOP.STORAGE_RULES].newValue || [];
-      renderRulesBadge();
-      if (!$('rules-backdrop').classList.contains('hidden')) renderRulesList();
-    }
+    if (area === 'local' && changes[GQLOP.STORAGE_RULES]) onRulesChanged(changes[GQLOP.STORAGE_RULES].newValue || []);
   });
+  function onRulesChanged(next) {
+    rules = next;
+    renderRulesBadge();
+    if (!$('rules-backdrop').classList.contains('hidden')) renderRulesList();
+    if (filterMode === 'ruled') reRenderList(); // membership of the Ruled chip just moved
+  }
   function saveRules(next) { rules = next; chrome.storage.local.set((function () { var o = {}; o[GQLOP.STORAGE_RULES] = next; return o; })()); }
   function renderRulesBadge() {
     var active = rules.filter(function (r) { return r.enabled !== false; }).length;
     $('rules-count').textContent = String(active);
   }
 
+  // Block rules covering this record (enabled or not) — drives the
+  // Block/Unblock item in the context menu.
+  function blockRulesFor(rec) {
+    return rules.filter(function (r) { return r.type === 'block' && ruleTargets(r, rec); });
+  }
+  // A rule the Block item created itself: nothing but this operation name, so
+  // deleting it can't take other operations down with it.
+  function isPlainNameBlock(rule, name) {
+    var m = rule.match || {};
+    return m.operationName === name && Object.keys(m).length === 1;
+  }
+
   function addBlockRule(rec) {
     var name = primaryOpName(rec);
+    var existing = blockRulesFor(rec);
+    if (existing.some(function (r) { return r.enabled !== false; })) { toast('"' + name + '" is already blocked'); return; }
+    if (existing.length) { // switched-off rule already covers it — re-arm that one
+      var off = Object.create(null);
+      existing.forEach(function (r) { off[r.id] = true; });
+      saveRules(rules.map(function (r) { return off[r.id] ? Object.assign({}, r, { enabled: true }) : r; }));
+      toast('Re-enabled the block rule for "' + name + '"');
+      return;
+    }
     var rule = { id: genId('rule_'), type: 'block', enabled: true, match: { operationName: name } };
     saveRules(rules.concat([rule]));
     toast('Blocking "' + name + '" — manage in Rules');
+  }
+
+  // The inverse of Block, straight from the list. Rules this menu created are
+  // deleted; anything broader (regex / URL / type — it may cover many other
+  // operations, or have been hand-written) is only switched off, never lost.
+  function removeBlockRule(rec) {
+    var name = primaryOpName(rec);
+    var on = blockRulesFor(rec).filter(function (r) { return r.enabled !== false; });
+    if (!on.length) { toast('No block rule matches "' + name + '"'); return; }
+    var drop = Object.create(null), disable = Object.create(null);
+    on.forEach(function (r) { (isPlainNameBlock(r, name) ? drop : disable)[r.id] = true; });
+    saveRules(rules
+      .filter(function (r) { return !drop[r.id]; })
+      .map(function (r) { return disable[r.id] ? Object.assign({}, r, { enabled: false }) : r; }));
+    var broad = Object.keys(disable).length;
+    toast('Unblocked "' + name + '"' + (broad ? ' — disabled ' + broad + ' broader rule' + (broad === 1 ? '' : 's') : ''));
   }
 
   function ruleMatchSummary(r) {
@@ -1091,6 +1272,79 @@
 
   function closeAllModals() { closeEditor(); closeRuleEditor(); closeRules(); }
 
+  // ---- resizable list / detail divider -----------------------------------
+  // The width is stored as a percentage of the split (the DevTools drawer gets
+  // resized and re-docked constantly, so pixels wouldn't survive) and applied to
+  // both left panes, so it holds when the search pane takes over from the list.
+  var SPLIT_KEY = 'gqlop_split_pct';
+  var SPLIT_DEFAULT = 58;
+  var MIN_LEFT = 220, MIN_RIGHT = 260; // px — keep both sides usable
+  var splitPct = SPLIT_DEFAULT;        // what the user asked for, before clamping
+
+  // Clamped on apply rather than on set: a narrow window can't shrink the
+  // remembered width, it only limits what's shown until there's room again.
+  function clampSplit(pct) {
+    var w = $('split').getBoundingClientRect().width;
+    if (!w) return pct;
+    var min = MIN_LEFT / w * 100, max = (w - MIN_RIGHT) / w * 100;
+    if (min > max) return 50; // too narrow to honour both minimums
+    return Math.min(max, Math.max(min, pct));
+  }
+  function applySplit(pct) {
+    splitPct = pct;
+    var eff = clampSplit(pct);
+    $('list-pane').style.flexBasis = eff + '%';
+    $('search-pane').style.flexBasis = eff + '%';
+    $('splitter').setAttribute('aria-valuenow', String(Math.round(eff)));
+  }
+  function saveSplit() { try { localStorage.setItem(SPLIT_KEY, String(Math.round(splitPct * 10) / 10)); } catch (e) {} }
+
+  (function initSplitter() {
+    var sp = $('splitter');
+    var stored = NaN;
+    try { stored = parseFloat(localStorage.getItem(SPLIT_KEY)); } catch (e) {}
+    applySplit(stored > 0 && stored < 100 ? stored : SPLIT_DEFAULT);
+
+    var dragging = false;
+    function moveTo(clientX) {
+      var box = $('split').getBoundingClientRect();
+      if (box.width) applySplit((clientX - box.left) / box.width * 100);
+    }
+    sp.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      dragging = true;
+      // Keep the events coming while the cursor is over the panes (or has left
+      // the panel iframe entirely).
+      try { sp.setPointerCapture(e.pointerId); } catch (x) {}
+      sp.classList.add('dragging');
+      document.body.classList.add('resizing');
+      hideContextMenu();
+      e.preventDefault();
+    });
+    // On document, not the splitter: works whether or not the capture took.
+    document.addEventListener('pointermove', function (e) { if (dragging) moveTo(e.clientX); });
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      sp.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      saveSplit();
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
+    sp.addEventListener('dblclick', function () { applySplit(SPLIT_DEFAULT); saveSplit(); });
+    sp.addEventListener('keydown', function (e) {
+      var step = e.shiftKey ? 5 : 1;
+      if (e.key === 'ArrowLeft') applySplit(clampSplit(splitPct) - step);
+      else if (e.key === 'ArrowRight') applySplit(clampSplit(splitPct) + step);
+      else if (e.key === 'Home') applySplit(SPLIT_DEFAULT);
+      else return;
+      e.preventDefault();
+      saveSplit();
+    });
+    window.addEventListener('resize', function () { applySplit(splitPct); }); // re-clamp, keep the intent
+  })();
+
   // ---- toolbar wiring ----------------------------------------------------
   $('btn-record').addEventListener('click', function () {
     recording = !recording;
@@ -1100,13 +1354,19 @@
   $('btn-clear').addEventListener('click', function () { clearAll(); sendPort({ type: GQLOP.M_CLEAR_BUFFER }); });
   $('chk-preserve').addEventListener('change', function () { preserveLog = $('chk-preserve').checked; });
   $('filter').addEventListener('input', function () { filterText = $('filter').value.trim().toLowerCase(); reRenderList(); });
-  Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (chip) {
+  // Scoped to the toolbar — the search pane has its own chips with their own handler.
+  Array.prototype.forEach.call(document.querySelectorAll('#toolbar .chip'), function (chip) {
     chip.addEventListener('click', function () {
-      document.querySelectorAll('.chip').forEach(function (c) { c.classList.remove('active'); });
+      document.querySelectorAll('#toolbar .chip').forEach(function (c) { c.classList.remove('active'); });
       chip.classList.add('active');
       filterMode = chip.getAttribute('data-f');
       reRenderList();
     });
+  });
+  $('dup-window').addEventListener('change', function () {
+    dupWindowMs = parseInt($('dup-window').value, 10) || GQLDupes.DEFAULT_WINDOW_MS;
+    recomputeDupes();
+    if (selectedId && byId[selectedId]) renderDetail(byId[selectedId]);
   });
 
   // ---- export / import ---------------------------------------------------
@@ -1165,6 +1425,7 @@
   }
 
   // ---- go ----------------------------------------------------------------
+  dupWindowMs = parseInt($('dup-window').value, 10) || GQLDupes.DEFAULT_WINDOW_MS; // browsers restore <select> state on reload
   connectPort();
   loadRules();
   updateCount();

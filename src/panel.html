@@ -20,6 +20,14 @@
       <button class="chip" data-f="errors">Errors <span id="chip-errors-n" class="chip-n">0</span></button>
       <button class="chip" data-f="mutations">Mutations</button>
       <button class="chip" data-f="ruled">Ruled</button>
+      <button class="chip" data-f="dupes" title="Identical calls (same URL, query &amp; variables) fired close together">Dupes <span id="chip-dupes-n" class="chip-n">0</span></button>
+      <select id="dup-window" title="Two identical GraphQL calls this close together are flagged as duplicates">
+        <option value="250">≤250ms</option>
+        <option value="500">≤500ms</option>
+        <option value="1000" selected>≤1s</option>
+        <option value="2000">≤2s</option>
+        <option value="5000">≤5s</option>
+      </select>
     </span>
     <span class="spacer"></span>
     <span id="count" class="count">0 operations</span>
@@ -68,9 +76,11 @@
       </table>
       <div id="empty" class="empty">
         <p id="empty-title">No GraphQL operations yet.</p>
-        <p id="empty-hint" class="hint">Interact with the page — every GraphQL request will appear here. Right-click a row to modify, block, or resend it. (If nothing shows up, reload the page so the interceptor attaches.)</p>
+        <p id="empty-hint" class="hint">Interact with the page — every GraphQL request will appear here. Right-click a row to modify, block, or resend it. (Capture starts when this panel opens; reload the page to catch the operations that fire during load.)</p>
       </div>
     </div>
+    <div id="splitter" role="separator" aria-orientation="vertical" tabindex="0"
+         title="Drag to resize — double-click to reset (← → when focused)"></div>
     <div id="detail-pane">
       <div id="detail-empty" class="empty"><p>Select an operation to see details.</p></div>
       <div id="detail" class="hidden">
@@ -270,6 +280,7 @@
   <script src="lib/protocol.js"></script>
   <script src="lib/codeview.js"></script>
   <script src="lib/search.js"></script>
+  <script src="lib/dupes.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>

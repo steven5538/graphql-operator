@@ -17,9 +17,17 @@ menu — plus persistent rules that intercept future traffic.
   highlighted code instead of a raw escaped blob. Large response/variable blocks
   auto-collapse; the query stays open. **Inline fragments** toggle expands `...Spreads`
   in place so fragment-heavy queries read as one tree.
+- **Duplicate-call hint** — when the *same* operation (same URL, method, query and
+  variables) fires twice inside a short window, every call in the burst is tinted
+  orange and tagged `dup ×N`. That is almost always a bug: a double-firing effect, a
+  re-render refetch, or two components asking for the same data. The detail pane says
+  how many, how far apart, and links to the sibling calls; the **Dupes** chip counts
+  them and filters the list. The window (`≤250ms` … `≤5s`, default `≤1s`) is a dropdown
+  next to the chip and re-clusters live. Query formatting and JSON key order are
+  ignored when comparing; your own **Resend**s are never flagged.
 - **Filter & find** — filter the list by text and by chips (All / Errors / Mutations /
-  Ruled, with a live errored-op count); find-in-viewer box highlights matches in the
-  query/response.
+  Ruled / Dupes, with live errored- and duplicate-op counts); find-in-viewer box
+  highlights matches in the query/response.
 - **Search all requests** (`Search all` button or `Ctrl/Cmd+F`) — one string searched
   across **every** recorded operation: variable values, query text, request/response
   bodies, headers, operation names and URLs. Hits are grouped per operation with the
@@ -32,6 +40,9 @@ menu — plus persistent rules that intercept future traffic.
   - **Modify & resend…** — edit the **Query** and **Variables** as separate fields
     (or switch to raw JSON), plus URL/headers, then fire it once.
   - **Block operation** — rule that returns a synthetic GraphQL error for matching ops.
+    Right-clicking an already-blocked operation offers **Unblock operation** instead, so
+    you never stack a second identical rule: it deletes the rule the menu created, or
+    (for a broader hand-written rule — regex / URL / type) just switches it off.
   - **Delay operation…** — rule that holds matching requests for N ms before they
     resolve (test loading states, timeouts, races). Default 30s.
   - **Override response…** — rule that returns a custom body / GraphQL error / HTTP
@@ -43,7 +54,13 @@ menu — plus persistent rules that intercept future traffic.
 - **Rules** (persistent, apply to all tabs) — block / rewrite / delay / override, matched
   by exact name, **regex**, operation type, HTTP method, or URL substring. Manage from
   the panel or the toolbar popup; toggle and delete individually.
+- **Resizable layout** — drag the divider between the list and the detail pane
+  (double-click to reset, `←` / `→` when it has focus). The width is remembered.
 - **Export / import** — save captured operations to JSON and re-import them.
+- **Zero footprint when idle** — `fetch` / `XMLHttpRequest` are only hooked while a
+  GraphQL panel is watching that tab or an enabled rule exists. The rest of the time
+  the page runs on the untouched native functions, so the extension never appears on
+  the call stack of requests it isn't inspecting (see *Notes & limits*).
 
 ## Install (unpacked)
 
@@ -55,6 +72,10 @@ menu — plus persistent rules that intercept future traffic.
    installed/reloaded — an already-open page won't be intercepted until you reload it.
    (The same applies every time you reload the extension during development.)
 5. Open **DevTools** (`F12` / `⌥⌘I`) and click the **GraphQL** tab.
+
+Capture begins the moment the panel attaches (no reload needed for that), but
+operations that already fired during page load are not retro-captured — reload the page
+to see those, the same way Chrome's own Network panel works.
 
 Works in Chrome and Edge 111+ (needs `world: "MAIN"` content scripts).
 
@@ -104,6 +125,16 @@ you should see `[GraphQL Operator] interceptor installed …` and a line per cap
   `fetch`.)
 - **GET GraphQL** operations (rare — some persisted-query setups) are not intercepted;
   only POST is inspected/blocked/rewritten.
+- **Hooks are installed on demand.** A main-world `fetch` hook is, by construction, the
+  top-most script frame of every request the page makes — and Chrome attributes console
+  errors (notably **CSP violations**) to that frame. Left always-on, the page's *own*
+  blocked requests get filed under this extension in `chrome://extensions`, which looks
+  like the extension is failing when nothing is wrong. So the interceptor stays dormant
+  and hooks nothing until a panel is watching that tab or an enabled rule exists;
+  `window.fetch` is the genuine native function the rest of the time. While you *are*
+  recording, the page's CSP violations will still be attributed to the extension —
+  that is inherent to main-world interception, and those errors are the page's, not
+  the extension's.
 - **Trust model:** the interceptor lives in the page's main world, so a hostile page
   could in principle observe rules pushed to it or interfere with interception. This is
   inherent to any main-world network hook; treat this as a developer tool for pages you
@@ -111,6 +142,11 @@ you should see `[GraphQL Operator] interceptor installed …` and a line per cap
   at rest (only pushed in-memory via `postMessage`).
 - **Batched** operations: a rewrite is applied per matching entry; a block rejects the
   whole batch if any entry matches.
+- **Duplicate detection** is a heuristic on the payload, not proof of a bug — a poll
+  faster than the window is flagged too. A burst is clustered from its *first* call, so
+  a steady poll slower than the window never collapses into one endless group. It runs
+  panel-side over what the panel has recorded, so it sees nothing from before the panel
+  was opened, and the chosen window is not persisted across panel reopens.
 - Request bodies are kept intact up to 5 MB for faithful resend (larger ones are flagged
   and resend is disabled); response bodies are truncated at 512 KB for display.
 - The interceptor **fails open**: any internal error falls back to the original
@@ -138,6 +174,7 @@ src/
   lib/protocol.js      shared constants (isolated content script, background, pages)
   lib/codeview.js      GraphQL/JSON pretty-printer + foldable, highlighted viewer
   lib/search.js        cross-request text search (fields, matcher, line numbers)
+  lib/dupes.js         duplicate-call detection (payload signature + time clustering)
 tools/gen-icons.js     dependency-free PNG icon generator
 icons/                 icon16/48/128.png
 test/e2e.mjs           Playwright end-to-end test (loads the extension in Chromium)
@@ -150,9 +187,9 @@ test/e2e.mjs           Playwright end-to-end test (loads the extension in Chromi
 ## Tests
 
 An end-to-end Playwright test loads the unpacked extension into Chromium and exercises
-recording, blocking, rewriting, resend, delay, the foldable code viewer, and the
-cross-request search (both the library and the real panel UI) against a mock GraphQL
-server:
+recording, blocking, rewriting, resend, delay, the foldable code viewer, the
+cross-request search, and duplicate detection (library, panel UI, and live intercepted
+traffic) against a mock GraphQL server:
 
 ```bash
 npm install                     # installs playwright

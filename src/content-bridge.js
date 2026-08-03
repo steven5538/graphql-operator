@@ -16,6 +16,8 @@
 
   var port = null;
   var rulesCache = [];
+  var panelAttached = false;
+  var activePushed = null; // last value sent to the page (null = never sent)
   // Unique per document load. Stable across port reconnects (script runs once
   // per document), so background can distinguish navigation from reconnect.
   var docId = String(Date.now()) + '_' + Math.random().toString(36).slice(2);
@@ -34,12 +36,36 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ---- page <- "should you hook at all?" ---------------------------------
+  // The interceptor patches fetch/XHR only while it has a reason to. Left
+  // installed on every page it would sit on the call stack of every request,
+  // which makes Chrome attribute the *page's* own CSP violations (and other
+  // network errors) to this extension in chrome://extensions.
+  function shouldIntercept() {
+    return panelAttached || rulesCache.some(function (r) { return r && r.enabled !== false; });
+  }
+
+  function pushActiveToPage(force) {
+    var active = shouldIntercept();
+    if (!force && active === activePushed) return;
+    activePushed = active;
+    try {
+      window.postMessage({ __gqlop: true, source: GQLOP.SRC_CONTENT, type: GQLOP.P_ACTIVE, payload: { active: active } }, '*');
+    } catch (e) { /* ignore */ }
+  }
+
+  function setPanelAttached(v) {
+    panelAttached = !!v;
+    pushActiveToPage(false);
+  }
+
   function loadRules() {
     try {
       chrome.storage.local.get(GQLOP.STORAGE_RULES, function (res) {
         if (chrome.runtime.lastError) return;
         rulesCache = (res && res[GQLOP.STORAGE_RULES]) || [];
         pushRulesToPage();
+        pushActiveToPage(false); // an enabled rule is reason enough to hook
       });
     } catch (e) { /* extension context invalidated */ }
   }
@@ -49,6 +75,7 @@
       if (area === 'local' && changes[GQLOP.STORAGE_RULES]) {
         rulesCache = changes[GQLOP.STORAGE_RULES].newValue || [];
         pushRulesToPage();
+        pushActiveToPage(false);
       }
     });
   } catch (e) { /* ignore */ }
@@ -63,6 +90,7 @@
 
     if (d.type === GQLOP.P_READY) {
       pushRulesToPage();
+      pushActiveToPage(true); // the page just (re)loaded — always state it explicitly
       return;
     }
     if (d.type === GQLOP.P_RECORD) {
@@ -90,6 +118,8 @@
         try {
           window.postMessage({ __gqlop: true, source: GQLOP.SRC_CONTENT, type: GQLOP.P_RESEND, payload: msg.payload }, '*');
         } catch (e) { /* ignore */ }
+      } else if (msg.type === GQLOP.M_PANEL_STATE) {
+        setPanelAttached(msg.attached);
       }
     });
     port.onDisconnect.addListener(function () {
