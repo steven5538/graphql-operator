@@ -435,30 +435,72 @@
     return wrap;
   }
 
-  // A find box that highlights matching rows across the code viewers in a pane.
-  // Also exposes paneEl.__applyFind(term, matcher) so a global-search hit can
-  // light up the same rows (matcher may be a regex one — see lib/search.js).
+  // A find box that highlights matching rows across the code viewers in a pane
+  // and steps through them: Enter / Shift+Enter, or the ↓ / ↑ buttons. The
+  // current match is marked cv-active and centred; navigation wraps around.
+  // Also exposes paneEl.__applyFind(term, matcher, activeRow) so a global-search
+  // hit can light up the same rows (matcher may be a regex one — see
+  // lib/search.js) and start the local stepping from the line it jumped to.
   function makeFindBar(paneEl) {
     var input = el('input', { type: 'search', class: 'find-input', placeholder: 'Find…' });
+    var prev = el('button', { type: 'button', class: 'find-nav', text: '↑', title: 'Previous match (Shift+Enter)' });
+    var next = el('button', { type: 'button', class: 'find-nav', text: '↓', title: 'Next match (Enter)' });
     var count = el('span', { class: 'find-count muted' });
+    var hits = [];   // matching .cv-row elements, in document order
+    var cur = -1;    // index into hits, -1 = nothing focused yet
+
+    function paint() {
+      for (var i = 0; i < hits.length; i++) hits[i].classList.toggle('cv-active', i === cur);
+      prev.disabled = next.disabled = !hits.length;
+      count.textContent = !input.value ? ''
+        : !hits.length ? 'No matches'
+          : cur >= 0 ? (cur + 1) + ' / ' + hits.length
+            : hits.length + (hits.length === 1 ? ' match' : ' matches');
+    }
+    function reveal(block) { if (cur >= 0 && hits[cur]) hits[cur].scrollIntoView({ block: block }); }
+
     function apply(matcher, scroll) {
-      var total = 0;
+      hits = [];
+      cur = -1;
       Array.prototype.forEach.call(paneEl.querySelectorAll('.codeview .cv-row'), function (row) {
-        row.classList.remove('cv-match');
+        row.classList.remove('cv-match', 'cv-active');
         if (!matcher) return;
         row.style.display = ''; // reveal folded rows so matches are visible
-        if (GQLSearch.matchRanges(matcher, row.textContent).length) { row.classList.add('cv-match'); total++; }
+        if (GQLSearch.matchRanges(matcher, row.textContent).length) { row.classList.add('cv-match'); hits.push(row); }
       });
-      count.textContent = matcher ? (total + (total === 1 ? ' match' : ' matches')) : '';
-      if (matcher && scroll) { var first = paneEl.querySelector('.cv-row.cv-match'); if (first) first.scrollIntoView({ block: 'nearest' }); }
-      return total;
+      if (hits.length && scroll) cur = 0; // land on the first match as you type
+      paint();
+      if (scroll) reveal('nearest');
+      return hits.length;
     }
+    function step(delta) {
+      if (!hits.length) return;
+      cur = cur < 0 ? (delta > 0 ? 0 : hits.length - 1) : (cur + delta + hits.length) % hits.length;
+      paint();
+      reveal('center');
+    }
+
     input.addEventListener('input', function () {
       var term = input.value;
       apply(term ? { needle: term.toLowerCase(), ci: true } : null, true);
     });
-    paneEl.__applyFind = function (term, matcher) { input.value = term || ''; apply(matcher || null, false); };
-    return el('div', { class: 'findbar' }, [input, count]);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); step(e.shiftKey ? -1 : 1); return; }
+      // First Escape clears the find; a second one falls through to the panel
+      // handler (which closes the global search / a modal).
+      if (e.key === 'Escape' && input.value) { e.preventDefault(); e.stopPropagation(); input.value = ''; apply(null, false); }
+    });
+    prev.addEventListener('click', function () { step(-1); input.focus(); });
+    next.addEventListener('click', function () { step(1); input.focus(); });
+
+    paneEl.__applyFind = function (term, matcher, activeRow) {
+      input.value = term || '';
+      apply(matcher || null, false);
+      var at = activeRow ? hits.indexOf(activeRow) : -1;
+      if (at >= 0) { cur = at; paint(); }  // keep Enter stepping on from this line
+    };
+    paint();
+    return el('div', { class: 'findbar' }, [input, el('span', { class: 'find-nav-group' }, [prev, next]), count]);
   }
 
   function renderDetail(rec) {
@@ -733,13 +775,16 @@
     activateTab(h.field.tab);
     var pane = document.querySelector('.tabpane[data-pane="' + h.field.tab + '"]');
     if (!pane) return;
-    var matcher = currentMatcher();
-    if (pane.__applyFind) pane.__applyFind(searchTerm, matcher);
-    highlightKvRows(pane, matcher);
-
     var blk = h.field.sk ? pane.querySelector('[data-sk="' + h.field.sk + '"]') : null;
     var rows = blk ? blk.querySelectorAll('.cv-row') : null;
     var row = rows && rows[h.match.line];
+
+    var matcher = currentMatcher();
+    // Hand the landing row to the pane's find bar so its "3 / 12" counter and
+    // Enter-stepping continue from here instead of restarting at match 1.
+    if (pane.__applyFind) pane.__applyFind(searchTerm, matcher, row);
+    highlightKvRows(pane, matcher);
+
     if (row) {
       row.style.display = ''; // may have been folded away
       row.classList.add('cv-match', 'cv-active');

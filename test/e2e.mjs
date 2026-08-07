@@ -515,6 +515,60 @@ async function setRules(sw, rules) {
     list: !document.getElementById('list-pane').classList.contains('hidden')
   }));
   check('Escape closes search and restores the list', closed.search && closed.list, closed);
+
+  // --- in-block find bar: step through the matches of one response ---
+  await panelPage.click('#op-rows tr:nth-child(2)'); // ListJobs — 4 "i" lines in its body
+  await panelPage.click('.tab[data-tab="response"]');
+  const findState = () => panelPage.evaluate(() => {
+    const pane = document.querySelector('.tabpane[data-pane="response"]');
+    const active = pane.querySelector('.cv-row.cv-active');
+    return {
+      count: pane.querySelector('.find-count').textContent,
+      matches: pane.querySelectorAll('.cv-row.cv-match').length,
+      actives: pane.querySelectorAll('.cv-row.cv-active').length,
+      active: active ? active.textContent.trim() : null,
+      navDisabled: Array.prototype.map.call(pane.querySelectorAll('.find-nav'), (b) => b.disabled)
+    };
+  });
+  await panelPage.fill('.tabpane[data-pane="response"] .find-input', 'i');
+  const f1 = await findState();
+  check('the find bar counts the matches and focuses the first', f1.count === '1 / 4' && f1.matches === 4 && f1.actives === 1 && /"id": "j1"/.test(f1.active), f1);
+
+  await panelPage.keyboard.press('Enter');
+  const f2 = await findState();
+  check('Enter advances to the next match', f2.count === '2 / 4' && /"title": "Cook"/.test(f2.active), f2);
+
+  await panelPage.keyboard.press('Shift+Enter');
+  await panelPage.keyboard.press('Shift+Enter');
+  const f0 = await findState();
+  check('Shift+Enter walks back and wraps to the last match', f0.count === '4 / 4' && /"title": "Barista"/.test(f0.active), f0);
+
+  await panelPage.click('.tabpane[data-pane="response"] .find-nav:last-child');
+  const fWrap = await findState();
+  check('the ↓ button wraps around to the first match', fWrap.count === '1 / 4' && /"id": "j1"/.test(fWrap.active), fWrap);
+
+  await panelPage.click('.tabpane[data-pane="response"] .find-nav:first-child');
+  const fPrev = await findState();
+  check('the ↑ button steps backwards', fPrev.count === '4 / 4', fPrev);
+
+  await panelPage.fill('.tabpane[data-pane="response"] .find-input', 'zzz-nothing');
+  const fNone = await findState();
+  check('no matches disables the arrows', fNone.count === 'No matches' && fNone.actives === 0 && fNone.navDisabled.every(Boolean), fNone);
+
+  await panelPage.keyboard.press('Escape');
+  const fCleared = await findState();
+  check('Escape clears the find box', fCleared.count === '' && fCleared.matches === 0, fCleared);
+
+  // a global-search jump should hand its line to the find bar as the current match
+  await panelPage.click('#btn-search');
+  await panelPage.fill('#search-input', 'abc-123');
+  await sleep(260);
+  await panelPage.click('.sr-group:nth-child(2) .sr-hit:last-child'); // ListJobs → response line
+  await sleep(120);
+  const handoff = await findState();
+  check('a global-search jump seeds the find bar at that line', /^\d+ \/ \d+$/.test(handoff.count) && handoff.actives === 1 && /abc-123/.test(handoff.active), handoff);
+  await panelPage.keyboard.press('Escape');
+
   check('no panel page errors while searching', panelErrors.length === 0, panelErrors);
   await panelPage.close();
 

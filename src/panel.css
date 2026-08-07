@@ -254,8 +254,16 @@ body.resizing { cursor: col-resize; user-select: none; }
   flex: 0 1 220px; font: inherit; padding: 3px 7px; border: 1px solid var(--border);
   border-radius: 5px; background: var(--bg); color: var(--text);
 }
+.find-nav-group { display: inline-flex; gap: 2px; }
+.find-nav {
+  font: inherit; font-size: 11px; line-height: 14px; color: var(--muted); background: var(--bg-3);
+  border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; cursor: pointer;
+}
+.find-nav:hover:not(:disabled) { color: var(--text); }
+.find-nav:disabled { opacity: .4; cursor: default; }
 .find-count { font-size: 11px; }
 .cv-row.cv-match { background: color-mix(in srgb, var(--amber) 28%, transparent); }
+.cv-row.cv-match.cv-active { background: color-mix(in srgb, var(--amber) 55%, transparent); }
 .tcheck.inline.endcap { align-self: flex-end; padding-bottom: 6px; white-space: nowrap; }
 .delay-input { display: inline-flex; align-items: center; gap: 6px; }
 .delay-input input { width: 120px; }

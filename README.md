@@ -26,8 +26,10 @@ menu — plus persistent rules that intercept future traffic.
   next to the chip and re-clusters live. Query formatting and JSON key order are
   ignored when comparing; your own **Resend**s are never flagged.
 - **Filter & find** — filter the list by text and by chips (All / Errors / Mutations /
-  Ruled / Dupes, with live errored- and duplicate-op counts); find-in-viewer box
-  highlights matches in the query/response.
+  Ruled / Dupes, with live errored- and duplicate-op counts); the find-in-viewer box
+  highlights every match in the query/response, shows `3 / 12`, and steps through them
+  with `Enter` / `Shift+Enter` or the `↑` / `↓` buttons (wrapping around, current match
+  centred). `Escape` clears the box.
 - **Search all requests** (`Search all` button or `Ctrl/Cmd+F`) — one string searched
   across **every** recorded operation: variable values, query text, request/response
   bodies, headers, operation names and URLs. Hits are grouped per operation with the
