@@ -52,7 +52,11 @@ menu — plus persistent rules that intercept future traffic.
     captured response so you can tweak it.
   - **Create rewrite rule…** — auto-modify the query, variables, or headers of future
     matching requests before they are sent.
-  - **Copy** operation name / query / variables / as a `cURL` command.
+  - **Copy** operation name / query / variables / as a `cURL` command. The cURL is built
+    from the headers the request **actually left the browser with** — cookies (including
+    `HttpOnly`), `Authorization` added by a service worker, `User-Agent`, `Origin`,
+    `Referer`, `sec-*` — so it runs as-is in a terminal instead of 401ing. (It therefore
+    contains your session: redact before pasting it into a ticket.)
 - **Rules** (persistent, apply to all tabs) — block / rewrite / delay / override, matched
   by exact name, **regex**, operation type, HTTP method, or URL substring. Manage from
   the panel or the toolbar popup; toggle and delete individually.
@@ -113,6 +117,17 @@ you should see `[GraphQL Operator] interceptor installed …` and a line per cap
   memory (and the service worker's per-tab buffer); only your **rules** are persisted
   (`chrome.storage.local`). Nothing is sent anywhere. Recorded requests include auth
   headers/cookies-bearing calls — treat the panel like the Network tab.
+- **Where the real headers come from.** A main-world `fetch` hook only sees what the page
+  passed in; everything the network stack adds afterwards (cookies, `Origin`, `Referer`,
+  `User-Agent`, `sec-*`) is invisible from there. The panel therefore also reads the
+  DevTools network log (`chrome.devtools.network`, no extra permission) and pairs each
+  finished request back to its record by method + URL + body. That pairing feeds
+  **Copy as cURL** and the *“as sent on the wire”* section of the **Headers** tab. When
+  no pairing exists — a **blocked** or **overridden** operation never reached the
+  network, and an **imported** one has no log entry — the cURL falls back to the
+  page-visible headers and the toast says so rather than handing you a command that
+  silently 401s. Two identical calls are paired to two distinct log entries, and a record
+  whose body is known is never paired with an entry carrying a different one.
 - **Blocking** returns HTTP `200` with a GraphQL `errors[]` body (`extensions.gqlOperatorBlocked`)
   for `fetch`, so apps handle it gracefully rather than crashing. Blocked `XHR` requests
   are surfaced to the page as a network error (legacy path).

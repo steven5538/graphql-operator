@@ -50,7 +50,9 @@ _(120 characters — check the counter after any edit.)_
 > • **Delay** — hold matching requests N seconds to test loading/timeout states.
 > • **Override response** — return a custom body / GraphQL error / HTTP status without
 >   hitting the server (force empty or error states).
-> • **Copy** the query, variables, or a ready‑to‑run cURL command.
+> • **Copy** the query, variables, or a ready‑to‑run cURL command — built from the headers
+>   the request actually left the browser with (cookies, auth, user agent), so it works in
+>   a terminal without hand‑editing.
 >
 > **Reusable rules**
 > Block / rewrite / delay / override rules persist across sessions and apply to all tabs.

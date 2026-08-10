@@ -1011,7 +1011,197 @@ async function setRules(sw, rules) {
   check('no panel page errors while blocking, unblocking and resizing', uiErrors.length === 0, uiErrors);
   await uiPanel.close();
 
-  console.log('\n[18] no fatal page errors');
+  console.log('\n[18] Copy as cURL carries the headers actually sent (cookies included)');
+  const curlPanel = await context.newPage();
+  const curlErrors = [];
+  curlPanel.on('pageerror', (e) => curlErrors.push(String(e)));
+  // Stub the two DevTools APIs the panel uses: a tabId, plus a network log we
+  // can push HAR entries into. Also capture clipboard writes.
+  await curlPanel.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    window.__netListeners = [];
+    try {
+      window.chrome.devtools = {
+        inspectedWindow: { tabId: 999996 },
+        network: { onRequestFinished: { addListener: (fn) => window.__netListeners.push(fn) } }
+      };
+    } catch (e) {}
+    window.__copied = [];
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: (t) => { window.__copied.push(t); return Promise.resolve(); } }
+      });
+    } catch (e) {}
+  });
+  await curlPanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+
+  const CURL_BODY = JSON.stringify({ operationName: 'GetUser', query: 'query GetUser { field }', variables: { id: 'abc-1' } });
+  const curlRec = {
+    id: 'c1', operationName: 'GetUser', operationType: 'query', method: 'POST',
+    url: 'https://ex.test/graphql', status: 200, ts: 1700000000000,
+    requestHeaders: { 'content-type': 'application/json' }, // all the page hooks can see
+    requestBody: CURL_BODY,
+    entries: [{ operationName: 'GetUser', query: 'query GetUser { field }', variables: { id: 'abc-1' } }]
+  };
+  // Another operation on the same endpoint with no network entry of its own:
+  // stands in for a blocked/imported/pre-panel record, and must not borrow the
+  // entry (or the body!) belonging to GetUser.
+  const OTHER_BODY = JSON.stringify({ operationName: 'Orphan', query: 'query Orphan { f }', variables: {} });
+  const curlRecNoWire = Object.assign({}, curlRec, {
+    id: 'c2', operationName: 'Orphan', requestBody: OTHER_BODY,
+    entries: [{ operationName: 'Orphan', query: 'query Orphan { f }', variables: {} }]
+  });
+  await curlPanel.setInputFiles('#import-file', {
+    name: 'ops.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({ tool: 'graphql-operator', version: 1, operations: [curlRec, curlRecNoWire] }))
+  });
+  await curlPanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 2);
+
+  // What DevTools would report for that request.
+  const fed = await curlPanel.evaluate((body) => {
+    const entry = {
+      startedDateTime: new Date(1700000000050).toISOString(),
+      _resourceType: 'xhr',
+      request: {
+        method: 'POST',
+        url: 'https://ex.test/graphql#frag',
+        headers: [
+          { name: ':authority', value: 'ex.test' },
+          { name: 'content-type', value: 'application/json' },
+          { name: 'Cookie', value: 'sid=supersecret123; plain=visible456' },
+          { name: 'authorization', value: 'Bearer tok-987' },
+          { name: 'User-Agent', value: 'Mozilla/5.0 (probe)' },
+          { name: 'Origin', value: 'https://ex.test' },
+          { name: 'Accept-Encoding', value: 'gzip, deflate, br' },
+          { name: 'Content-Length', value: String(body.length) },
+          { name: 'Host', value: 'ex.test' }
+        ],
+        cookies: [{ name: 'sid', value: 'supersecret123', httpOnly: true }],
+        postData: { text: body }
+      }
+    };
+    window.__netListeners.forEach((fn) => fn(entry));
+    // A resource type the panel must ignore, on the same URL.
+    window.__netListeners.forEach((fn) => fn({
+      startedDateTime: new Date(1700000000000).toISOString(), _resourceType: 'stylesheet',
+      request: { method: 'POST', url: 'https://ex.test/graphql', headers: [{ name: 'Cookie', value: 'wrong=1' }], postData: { text: body } }
+    }));
+    return window.__netListeners.length;
+  }, CURL_BODY);
+  check('panel subscribed to the DevTools network log', fed === 1, fed);
+
+  async function copyCurlFor(id) {
+    await curlPanel.keyboard.press('Escape');
+    await curlPanel.click('#op-rows tr[data-id="' + id + '"]', { button: 'right' });
+    const clicked = await curlPanel.evaluate(() => {
+      const b = Array.prototype.filter.call(document.querySelectorAll('#ctx-menu button'), (x) => x.textContent === 'Copy as cURL')[0];
+      if (!b) return false;
+      b.click();
+      return true;
+    });
+    if (!clicked) return null;
+    await curlPanel.waitForFunction(() => window.__copied.length > 0);
+    return curlPanel.evaluate(() => {
+      const t = window.__copied.pop();
+      return { text: t, toast: document.getElementById('toast').textContent };
+    });
+  }
+
+  const c = await copyCurlFor('c1');
+  check('Copy as cURL produced a command', !!c && /^curl 'https:\/\/ex\.test\/graphql'/.test(c.text), c && c.text);
+  check('the session cookie is included (the actual complaint)', /-b 'sid=supersecret123; plain=visible456'/.test(c.text), c.text);
+  check('Authorization added below the page is included', /-H 'authorization: Bearer tok-987'/.test(c.text), c.text);
+  check('browser headers the page never set are included (UA, Origin)',
+    /-H 'User-Agent: Mozilla\/5\.0 \(probe\)'/.test(c.text) && /-H 'Origin: https:\/\/ex\.test'/.test(c.text), c.text);
+  check('the page-set content-type survives', /-H 'content-type: application\/json'/.test(c.text), c.text);
+  check('the request body is sent with --data-raw (so a leading @ is not a filename)',
+    c.text.indexOf("--data-raw '" + CURL_BODY + "'") !== -1, c.text);
+  check('HTTP/2 pseudo-headers are dropped', !/:authority/.test(c.text), c.text);
+  check('Cookie is not also emitted as -H (curl would send it twice)', !/-H 'Cookie/i.test(c.text), c.text);
+  check('curl-managed headers are dropped (Content-Length, Host)', !/Content-Length|-H 'Host/i.test(c.text), c.text);
+  check('--compressed accompanies Accept-Encoding', /--compressed/.test(c.text), c.text);
+  check('redundant -X POST is omitted (implied by --data-raw)', !/-X POST/.test(c.text), c.text);
+  check('the URL fragment is stripped', !/#frag/.test(c.text), c.text);
+  check('a stylesheet entry on the same URL is never matched', !/wrong=1/.test(c.text), c.text);
+  check('the toast says cookies went along', /includes cookies/.test(c.toast || ''), c && c.toast);
+
+  const c2 = await copyCurlFor('c2');
+  check('a record DevTools never saw still copies (page headers only)',
+    !!c2 && /-H 'content-type: application\/json'/.test(c2.text) && !/-b /.test(c2.text), c2 && c2.text);
+  check('and the toast says so instead of implying a working command',
+    /no cookies/.test((c2 && c2.toast) || ''), c2 && c2.toast);
+  check('another operation on the same endpoint never borrows GetUser\'s entry or body',
+    !!c2 && c2.text.indexOf(OTHER_BODY) !== -1 && c2.text.indexOf('supersecret123') === -1, c2 && c2.text);
+
+  const headersShown = await curlPanel.evaluate(() => {
+    document.querySelector('#op-rows tr[data-id="c1"]').click();
+    const tab = Array.prototype.filter.call(document.querySelectorAll('.tab'), (t) => t.getAttribute('data-tab') === 'headers')[0];
+    tab.click();
+    const pane = document.querySelector('.tabpane[data-pane="headers"]');
+    return pane.textContent;
+  });
+  check('the Headers tab shows the wire headers too', /as sent on the wire/.test(headersShown) && /supersecret123/.test(headersShown), headersShown.slice(0, 200));
+  check('and still shows what the page set separately', /set by the page/.test(headersShown), headersShown.slice(0, 200));
+  check('no panel page errors while copying cURL', curlErrors.length === 0, curlErrors);
+  await curlPanel.close();
+
+  console.log('\n[19] wire.js pairs records with the right network entry');
+  const wirePage = await context.newPage();
+  await wirePage.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+  const wire = await wirePage.evaluate(() => {
+    const body = JSON.stringify({ operationName: 'Dup', query: 'query Dup { f }' });
+    const entry = (t, cookie, url) => ({
+      startedDateTime: new Date(t).toISOString(), _resourceType: 'fetch',
+      request: { method: 'POST', url: url || 'https://ex.test/graphql', headers: [{ name: 'Cookie', value: cookie }], postData: { text: body } }
+    });
+    const rec = (id, ts, extra) => Object.assign({ id, method: 'POST', url: 'https://ex.test/graphql', requestBody: body, ts }, extra || {});
+    const out = {};
+
+    // two identical calls -> two distinct entries
+    let s = GQLWire.createStore();
+    s.add(entry(1000, 'first=1'));
+    s.add(entry(2000, 'second=2'));
+    out.dupA = s.match(rec('a', 1000)).cookie;
+    out.dupB = s.match(rec('b', 2000)).cookie;
+    out.stable = s.match(rec('a', 1000)).cookie; // repeat lookup must not drift
+
+    // a relative XHR url still finds its absolute entry
+    s = GQLWire.createStore();
+    s.add(entry(1000, 'rel=1'));
+    out.relative = s.match(rec('r', 1000, { url: '/graphql' })).cookie;
+
+    // a different path never matches
+    out.otherPath = s.match(rec('o', 1000, { url: '/other' }));
+
+    // truncated capture still pairs by body prefix, and cURL uses the whole body
+    s = GQLWire.createStore();
+    s.add(entry(1000, 'trunc=1'));
+    const cut = rec('t', 1000, { requestBody: body.slice(0, 20), requestBodyTruncated: true });
+    const hit = s.match(cut);
+    out.truncMatched = !!hit && hit.cookie === 'trunc=1';
+    out.truncFullBody = GQLWire.buildCurl(cut, hit).indexOf(body) !== -1;
+
+    // GET (persisted queries) keeps no -X and no body
+    const g = GQLWire.buildCurl({ id: 'g', method: 'GET', url: 'https://ex.test/graphql?q=1' }, null);
+    out.getCurl = g;
+
+    // quoting survives a body with single quotes
+    out.quoted = GQLWire.buildCurl({ id: 'q', method: 'POST', url: 'https://ex.test/g', requestBody: `{"a":"it's"}` }, null);
+    return out;
+  });
+  check('two identical calls pair with two different network entries',
+    wire.dupA === 'first=1' && wire.dupB === 'second=2', [wire.dupA, wire.dupB]);
+  check('a second lookup of the same record returns the same entry', wire.stable === 'first=1', wire.stable);
+  check('a relative XHR url pairs with its absolute network entry', wire.relative === 'rel=1', wire.relative);
+  check('a different path is never paired', wire.otherPath === null, wire.otherPath);
+  check('a truncated captured body still pairs by prefix', wire.truncMatched, wire);
+  check('and cURL then uses the complete body from the network log', wire.truncFullBody, wire);
+  check('a GET copies without -X or a body', !/-X|--data-raw/.test(wire.getCurl), wire.getCurl);
+  check("a body containing ' is escaped for the shell", wire.quoted.indexOf(`'{"a":"it'\\''s"}'`) !== -1, wire.quoted);
+  await wirePage.close();
+
+  console.log('\n[20] no fatal page errors');
   const gqlopErr = pageErrors.filter((e) => /GQLOP is not defined/.test(e));
   check('no "GQLOP is not defined" errors', gqlopErr.length === 0, gqlopErr);
   check('no uncaught page errors at all', pageErrors.length === 0, pageErrors);

@@ -28,6 +28,10 @@
   var editorOrigBody = null;
   var editingRuleId = null;
 
+  // Real on-wire request headers (cookies, auth, UA…) keyed off the DevTools
+  // network log — the page-level hooks in injected.js cannot see them.
+  var wireStore = GQLWire.createStore();
+
   var $ = function (id) { return document.getElementById(id); };
 
   function el(tag, props, children) {
@@ -130,6 +134,7 @@
     rowById = Object.create(null);
     pendingPatches = Object.create(null);
     searchFieldCache = Object.create(null);
+    wireStore.clear();
     resetDupes();
     selectedId = null;
     $('op-rows').textContent = '';
@@ -546,7 +551,19 @@
     // headers
     var hPane = document.querySelector('.tabpane[data-pane="headers"]');
     hPane.textContent = '';
-    hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers' }));
+    // When DevTools saw the request we can show what the network stack really
+    // sent (cookies, UA, Origin…), which is a superset of the page's headers.
+    var wire = wireEntry(rec);
+    if (wire) {
+      var sent = {};
+      wire.headers.forEach(function (h) { sent[h.name] = h.value; });
+      if (wire.cookie && !sent.Cookie && !sent.cookie) sent.Cookie = wire.cookie;
+      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers (as sent on the wire)' }));
+      hPane.appendChild(kvTable(sent));
+      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers set by the page' }));
+    } else {
+      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers' }));
+    }
     hPane.appendChild(kvTable(rec.requestHeaders));
     hPane.appendChild(el('div', { class: 'section-label', text: 'Response headers' }));
     hPane.appendChild(kvTable(rec.responseHeaders));
@@ -871,7 +888,7 @@
     item('Copy operation name', '', function () { copyText(primary, 'Operation name copied'); });
     item('Copy query', '', function () { copyText(primaryQuery(rec), 'Query copied'); });
     item('Copy variables', '', function () { copyText(primaryVars(rec), 'Variables copied'); });
-    item('Copy as cURL', '', function () { copyText(asCurl(rec), 'cURL command copied'); });
+    item('Copy as cURL', '', function () { copyCurl(rec); });
 
     menu.classList.remove('hidden');
     // reposition to stay on-screen
@@ -934,13 +951,17 @@
     if (es.length === 1) return prettyJson(es[0].variables != null ? es[0].variables : {});
     return prettyJson(es.map(function (e) { return e.variables != null ? e.variables : {}; }));
   }
-  function asCurl(rec) {
-    function q(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-    var parts = ['curl ' + q(rec.url), '-X ' + (rec.method || 'POST')];
-    var h = rec.requestHeaders || {};
-    Object.keys(h).forEach(function (k) { parts.push('-H ' + q(k + ': ' + h[k])); });
-    if (rec.requestBody) parts.push('--data ' + q(rec.requestBody));
-    return parts.join(' \\\n  ');
+  function wireEntry(rec) {
+    try { return wireStore.match(rec); } catch (e) { return null; }
+  }
+  // Say whether the command carries the session or only what the page set —
+  // pasting a cookie-less curl at a server that 401s is a confusing 10 minutes.
+  function copyCurl(rec) {
+    var entry = wireEntry(rec);
+    var msg = entry
+      ? (entry.cookie ? 'cURL copied — includes cookies & auth headers' : 'cURL copied with the headers as sent')
+      : 'cURL copied — page headers only (no cookies: DevTools never saw this request)';
+    copyText(GQLWire.buildCurl(rec, entry), msg);
   }
 
   // ---- clipboard ---------------------------------------------------------
@@ -1469,8 +1490,32 @@
     toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 3000);
   }
 
+  // ---- wire headers ------------------------------------------------------
+  // DevTools reports every finished request with the headers the network stack
+  // really sent. We keep them so a record can be paired with its wire form.
+  function watchNetwork() {
+    var net = chrome.devtools && chrome.devtools.network;
+    if (!net || !net.onRequestFinished) return; // not a real DevTools host
+    net.onRequestFinished.addListener(function (entry) {
+      try { wireStore.add(entry); } catch (e) { /* malformed HAR entry — ignore */ }
+    });
+    // The listener only sees what finishes from now on, but DevTools has been
+    // logging since it opened — backfill so operations recorded before this
+    // panel was first shown also get their real headers. (add() dedupes.)
+    if (net.getHAR) {
+      try {
+        net.getHAR(function (har) {
+          ((har && har.entries) || []).forEach(function (e) {
+            try { wireStore.add(e); } catch (err) {}
+          });
+        });
+      } catch (e) { /* older hosts */ }
+    }
+  }
+
   // ---- go ----------------------------------------------------------------
   dupWindowMs = parseInt($('dup-window').value, 10) || GQLDupes.DEFAULT_WINDOW_MS; // browsers restore <select> state on reload
+  watchNetwork();
   connectPort();
   loadRules();
   updateCount();
