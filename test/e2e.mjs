@@ -306,7 +306,16 @@ async function setRules(sw, rules) {
     // inline fragments: spread should be replaced by the fragment's fields
     const inlined = GQLCode.inlineFragments('query Q { a { ...F } } fragment F on T { x y }');
     const inlineOk = /x[\s\S]*y/.test(inlined) && inlined.indexOf('fragment F') === -1;
-    return { rows, foldable, hidden, highlighted, autoHidden, inlineOk };
+    // copy info: what each line hands to the clipboard
+    const doc = JSON.stringify({ data: { 'odd key': { note: 'a, b', n: -1.5, kids: [{ id: 'x' }] } } }, null, 2);
+    const at = (i) => GQLCode.copyInfo(doc, 'json', i);
+    const copy = {
+      note: at(3).value, noteKeyed: at(3).withKey, num: at(4).value,
+      oddPath: at(3).path, deepPath: at(6).path,
+      block: at(5).value, blockLines: at(5).lineCount,
+      gql: GQLCode.copyInfo(src, 'graphql', 1).value
+    };
+    return { rows, foldable, hidden, highlighted, autoHidden, inlineOk, copy, docLines: doc.split('\n') };
   });
   check('renders multiple code rows', cv.rows > 3, cv.rows);
   check('has foldable blocks (incl. fragment)', cv.foldable >= 2, cv.foldable);
@@ -314,6 +323,12 @@ async function setRules(sw, rules) {
   check('applies syntax highlighting (keywords)', cv.highlighted > 0, cv.highlighted);
   check('auto-collapses large JSON blocks by default', cv.autoHidden > 0, cv.autoHidden);
   check('inline fragments expands spreads inline', cv.inlineOk);
+  check('a leaf copies as its bare value, keeping a comma inside the string',
+    cv.copy.note === 'a, b' && cv.copy.noteKeyed === '"note": "a, b"' && cv.copy.num === '-1.5', cv.copy);
+  check('a block copies as standalone JSON', cv.copy.block === '[\n  {\n    "id": "x"\n  }\n]' && cv.copy.blockLines === 5, cv.copy);
+  check('paths quote keys that are not identifiers and count array entries',
+    cv.copy.oddPath === 'data["odd key"].note' && cv.copy.deepPath === 'data["odd key"].kids[0]', cv.copy);
+  check('a GraphQL selection set copies dedented', cv.copy.gql === 'a(id: $id) {\n  b\n  c\n}', JSON.stringify(cv.copy.gql));
   await cvPage.close();
 
   console.log('\n[11] override rule returns a mocked response (no server hit)');
@@ -1201,7 +1216,204 @@ async function setRules(sw, rules) {
   check("a body containing ' is escaped for the shell", wire.quoted.indexOf(`'{"a":"it'\\''s"}'`) !== -1, wire.quoted);
   await wirePage.close();
 
-  console.log('\n[20] no fatal page errors');
+  console.log('\n[20] copy: values, blocks and paths out of a response');
+  const copyPanel = await context.newPage();
+  const copyErrors = [];
+  copyPanel.on('pageerror', (e) => copyErrors.push(String(e)));
+  await copyPanel.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: 999995 } }; } catch (e) {}
+    window.__copied = [];
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: (t) => { window.__copied.push(t); return Promise.resolve(); } }
+      });
+    } catch (e) {}
+  });
+  await copyPanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+
+  // A title with a comma in it: the separator-comma must go, that one must stay.
+  const RESULTS = [{ id: 'job-1', title: 'Cook, night shift' }, { id: 'job-2', title: 'Barista' }];
+  const COPY_RESP = JSON.stringify({ data: { search: { total: 2, results: RESULTS } } });
+  const COPY_QUERY = 'query FindJobs($q: String!) { search(q: $q) { total results { id title } } }';
+  await copyPanel.setInputFiles('#import-file', {
+    name: 'copy.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      tool: 'graphql-operator', version: 1,
+      operations: [
+        { id: 'k1', operationName: 'FindJobs', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql',
+          status: 200, ts: 1700000000000, responseBody: COPY_RESP,
+          entries: [{ operationName: 'FindJobs', query: COPY_QUERY, variables: { q: 'cook' } }] },
+        { id: 'k2', operationName: 'NoBody', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql',
+          status: 200, ts: 1700000001000, entries: [{ operationName: 'NoBody', query: 'query NoBody { f }', variables: {} }] }
+      ]
+    }))
+  });
+  await copyPanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 2);
+  await copyPanel.click('#op-rows tr[data-id="k1"]');
+  await copyPanel.click('.tab[data-tab="response"]');
+
+  // Click the hover-copy button on the response row containing `needle`.
+  const clickRowCopy = (needle) => copyPanel.evaluate((n) => {
+    const rows = document.querySelectorAll('.tabpane[data-pane="response"] [data-sk="res"] .cv-row');
+    for (const r of rows) {
+      if (r.textContent.indexOf(n) === -1) continue;
+      const b = r.querySelector('.cv-copy');
+      b.dispatchEvent(new MouseEvent('mouseenter'));
+      const highlighted = document.querySelectorAll('.tabpane[data-pane="response"] .cv-row.cv-copyhi').length;
+      b.click();
+      return { highlighted, title: b.title };
+    }
+    return null;
+  }, needle);
+  const lastCopy = () => copyPanel.evaluate(() => ({ text: window.__copied.pop(), toast: document.getElementById('toast').textContent }));
+
+  const hasCopyButtons = await copyPanel.evaluate(() => {
+    const rows = document.querySelectorAll('.tabpane[data-pane="response"] [data-sk="res"] .cv-row');
+    return { rows: rows.length, buttons: document.querySelectorAll('.tabpane[data-pane="response"] [data-sk="res"] .cv-copy').length };
+  });
+  check('every row of the response gets a copy button', hasCopyButtons.rows > 5 && hasCopyButtons.buttons === hasCopyButtons.rows, hasCopyButtons);
+
+  const blockHover = await clickRowCopy('"results": [');
+  const blockCopy = await lastCopy();
+  check('hovering the button previews the whole block it will copy',
+    blockHover && blockHover.highlighted === 10, blockHover);
+  check('copying a block yields the value on its own, valid and dedented',
+    JSON.stringify(JSON.parse(blockCopy.text)) === JSON.stringify(RESULTS), blockCopy.text);
+  check('the toast names the block that was copied and its size',
+    /Copied "results" — 10 lines/.test(blockCopy.toast || ''), blockCopy.toast);
+
+  await clickRowCopy('Cook, night shift');
+  const leafCopy = await lastCopy();
+  check('copying a leaf gives the bare value — no quotes, no separating comma, inner comma kept',
+    leafCopy.text === 'Cook, night shift', JSON.stringify(leafCopy.text));
+
+  await clickRowCopy('"total"');
+  const numCopy = await lastCopy();
+  check('a number copies as a number', numCopy.text === '2', numCopy.text);
+
+  // right-click a line -> value / with key / path / everything
+  const openRowMenu = (needle) => copyPanel.evaluate((n) => {
+    const rows = document.querySelectorAll('.tabpane[data-pane="response"] [data-sk="res"] .cv-row');
+    for (const r of rows) {
+      if (r.textContent.indexOf(n) === -1) continue;
+      r.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 120 }));
+      return Array.prototype.map.call(document.querySelectorAll('#ctx-menu button'),
+        (b) => b.querySelector('span').textContent);
+    }
+    return null;
+  }, needle);
+  const clickMenu = (label) => copyPanel.evaluate((l) => {
+    const b = Array.prototype.filter.call(document.querySelectorAll('#ctx-menu button'),
+      (x) => x.querySelector('span').textContent === l)[0];
+    if (!b) return false;
+    b.click();
+    return true;
+  }, label);
+
+  const rowMenu = await openRowMenu('"title": "Barista"');
+  check('right-clicking a line offers value, key and path',
+    rowMenu && rowMenu.join('|') === 'Copy value|Copy with key|Copy path|Copy everything here', rowMenu);
+
+  await clickMenu('Copy path');
+  const pathCopy = await lastCopy();
+  check('Copy path gives the JSON path to that line', pathCopy.text === 'data.search.results[1].title', pathCopy.text);
+
+  await openRowMenu('"title": "Barista"');
+  await clickMenu('Copy with key');
+  const withKey = await lastCopy();
+  check('Copy with key keeps the JSON shape', withKey.text === '"title": "Barista"', withKey.text);
+
+  await openRowMenu('"results": [');
+  const blockMenu = await copyPanel.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#ctx-menu button'), (b) => b.textContent));
+  check('a block line says so and shows how big it is', /Copy block10 lines/.test(blockMenu.join('|')), blockMenu);
+  await clickMenu('Copy everything here');
+  const allCopy = await lastCopy();
+  check('Copy everything here takes the whole viewer',
+    JSON.stringify(JSON.parse(allCopy.text)) === JSON.stringify(JSON.parse(COPY_RESP)), allCopy.text);
+
+  // the heading's own Copy button
+  await copyPanel.click('.tabpane[data-pane="response"] .section-label .copy-link');
+  const sectionCopy = await lastCopy();
+  check('the Body heading copies the whole response',
+    JSON.stringify(JSON.parse(sectionCopy.text)) === JSON.stringify(JSON.parse(COPY_RESP)) && /Response copied/.test(sectionCopy.toast || ''), sectionCopy.toast);
+
+  await copyPanel.click('.tab[data-tab="request"]');
+  const reqCopyLabels = await copyPanel.evaluate(() =>
+    Array.prototype.map.call(document.querySelectorAll('.tabpane[data-pane="request"] .section-label'),
+      (l) => l.firstChild.textContent + (l.querySelector('.copy-link') ? '+copy' : '')));
+  check('the query and variables headings have one too', reqCopyLabels.join(',') === 'Operation type,Query+copy,Variables+copy', reqCopyLabels);
+  await copyPanel.click('.tabpane[data-pane="request"] .section-label .copy-link');
+  const queryCopy = await lastCopy();
+  check('copying the query gives it formatted, not as one escaped line',
+    /^query FindJobs\(\$q: String!\) \{\n {2}search\(q: \$q\) \{/.test(queryCopy.text || ''), queryCopy.text);
+
+  // and from the operation list, without opening anything
+  await copyPanel.keyboard.press('Escape');
+  await copyPanel.click('#op-rows tr[data-id="k1"]', { button: 'right' });
+  const listMenu = await copyPanel.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#ctx-menu button'), (b) => b.textContent));
+  check('the operation list offers Copy response', listMenu.indexOf('Copy response') !== -1, listMenu);
+  await copyPanel.evaluate(() => {
+    Array.prototype.filter.call(document.querySelectorAll('#ctx-menu button'), (b) => b.textContent === 'Copy response')[0].click();
+  });
+  const listCopy = await lastCopy();
+  check('and copies it pretty-printed', /^\{\n {2}"data": \{/.test(listCopy.text || ''), (listCopy.text || '').slice(0, 40));
+
+  await copyPanel.keyboard.press('Escape');
+  await copyPanel.click('#op-rows tr[data-id="k2"]', { button: 'right' });
+  const noBodyMenu = await copyPanel.evaluate(() => {
+    const b = Array.prototype.filter.call(document.querySelectorAll('#ctx-menu button'), (x) => x.textContent === 'Copy response')[0];
+    return b ? b.disabled : null;
+  });
+  check('an operation with no response has Copy response disabled', noBodyMenu === true, noBodyMenu);
+  await copyPanel.keyboard.press('Escape');
+
+  console.log('\n[21] the tab bar lives in the title bar and stays put while scrolling');
+  const placement = await copyPanel.evaluate(() => ({
+    inTitleBar: !!document.querySelector('#detail-top #detail-head') && !!document.querySelector('#detail-top .tabs'),
+    sameRow: (() => {
+      const h = document.querySelector('#detail-head').getBoundingClientRect();
+      const t = document.querySelector('.tabs').getBoundingClientRect();
+      return t.left >= h.right - 1 && t.bottom <= h.bottom + 12;
+    })()
+  }));
+  check('the tabs sit inside the title bar, beside the operation name', placement.inTitleBar && placement.sameRow, placement);
+
+  await copyPanel.setViewportSize({ width: 1000, height: 360 });
+  await copyPanel.click('#op-rows tr[data-id="k1"]');
+  await copyPanel.click('.tab[data-tab="response"]');
+  const scrolled = await copyPanel.evaluate(() => {
+    const panes = document.querySelector('.tabpanes');
+    const before = document.querySelector('.tabs').getBoundingClientRect().top;
+    panes.scrollTop = 9999;
+    const tabs = document.querySelector('.tabs').getBoundingClientRect();
+    return {
+      before, after: tabs.top, scrolledBy: panes.scrollTop,
+      onScreen: tabs.top >= 0 && tabs.bottom <= window.innerHeight,
+      paneScrolls: document.getElementById('detail-pane').scrollHeight <= document.getElementById('detail-pane').clientHeight
+    };
+  });
+  check('the pane below the tabs is the thing that scrolls', scrolled.scrolledBy > 0 && scrolled.paneScrolls, scrolled);
+  check('the tab bar does not move when it does', scrolled.after === scrolled.before && scrolled.onScreen, scrolled);
+
+  await copyPanel.click('.tab[data-tab="headers"]');
+  const afterSwitch = await copyPanel.evaluate(() => ({
+    active: (document.querySelector('.tab.active') || {}).textContent,
+    pane: !!document.querySelector('.tabpane[data-pane="headers"].active')
+  }));
+  check('so you can still switch tabs from the bottom of a long response',
+    afterSwitch.active === 'Headers' && afterSwitch.pane, afterSwitch);
+
+  await copyPanel.click('.tab[data-tab="response"]');
+  await copyPanel.evaluate(() => { document.querySelector('.tabpanes').scrollTop = 9999; });
+  await copyPanel.click('#op-rows tr[data-id="k2"]');
+  const topReset = await copyPanel.evaluate(() => document.querySelector('.tabpanes').scrollTop);
+  check('picking another operation starts it at the top', topReset === 0, topReset);
+  check('no panel page errors while copying', copyErrors.length === 0, copyErrors);
+  await copyPanel.close();
+
+  console.log('\n[22] no fatal page errors');
   const gqlopErr = pageErrors.filter((e) => /GQLOP is not defined/.test(e));
   check('no "GQLOP is not defined" errors', gqlopErr.length === 0, gqlopErr);
   check('no uncaught page errors at all', pageErrors.length === 0, pageErrors);

@@ -376,11 +376,15 @@
   }
 
   function selectRecord(id) {
+    var changed = selectedId !== id;
     if (selectedId && rowById[selectedId]) rowById[selectedId].classList.remove('selected');
     selectedId = id;
     if (rowById[id]) rowById[id].classList.add('selected');
     var rec = byId[id];
     if (rec) renderDetail(rec);
+    // A different operation starts at the top; a re-render of the same one keeps
+    // whatever the reader was looking at.
+    if (changed) { var p = document.querySelector('.tabpanes'); if (p) p.scrollTop = 0; }
   }
 
   function updateCount() { $('count').textContent = records.length + (records.length === 1 ? ' operation' : ' operations'); }
@@ -401,12 +405,69 @@
 
   // Foldable, syntax-highlighted code block (falls back to <pre> if codeview missing).
   // opts.autoCollapseLines auto-folds blocks taller than N lines (used for bodies).
+  // Every row can copy the piece of the document it opens — see copyRow/copyRowMenu.
   var AUTO_COLLAPSE = 24;
   function codeBlock(text, lang, opts) {
     if (window.GQLCode && text != null && text !== '') {
-      try { return GQLCode.renderFoldableCode(String(text), lang, opts); } catch (e) { /* fall through */ }
+      var full = Object.assign({}, opts || {}, { copy: copyRow, menu: copyRowMenu });
+      try { return GQLCode.renderFoldableCode(String(text), lang, full); } catch (e) { /* fall through */ }
     }
     return el('pre', { class: 'block', text: (text == null || text === '') ? '(empty)' : String(text) });
+  }
+
+  // ---- copying a piece of a viewer ---------------------------------------
+  // The hover button on each row copies the value it sits on: the whole subtree
+  // for a line that opens one, the bare value for a leaf (an id you can paste
+  // straight into another tool). Right-click for the key, the path, or the lot.
+  function copyRow(text, info) { copyText(text, copiedLabel(info)); }
+  function ellipsize(s, n, fromStart) {
+    s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+    if (s.length <= n) return s;
+    return fromStart ? '…' + s.slice(-(n - 1)) : s.slice(0, n - 1) + '…';
+  }
+  function copiedLabel(info) {
+    var what = info.key ? '"' + info.key + '"' : (info.isBlock ? 'block' : 'value');
+    return 'Copied ' + what + (info.isBlock ? ' — ' + info.lineCount + ' lines' : '');
+  }
+  function copyRowMenu(info, x, y) {
+    var menu = $('ctx-menu');
+    menu.textContent = '';
+    function item(label, hint, fn) {
+      var b = el('button', {}, [el('span', { text: label })]);
+      if (hint) b.appendChild(el('span', { class: 'ctx-hint', text: hint }));
+      b.addEventListener('click', function () { hideContextMenu(); fn(); });
+      menu.appendChild(b);
+    }
+    item(info.isBlock ? 'Copy block' : 'Copy value',
+      info.isBlock ? info.lineCount + ' lines' : ellipsize(info.value, 22),
+      function () { copyText(info.value, copiedLabel(info)); });
+    if (info.key && info.withKey !== info.value) {
+      item('Copy with key', '"' + info.key + '": …', function () { copyText(info.withKey, 'Copied "' + info.key + '" with its key'); });
+    }
+    // paths are read tail-first, so trim the front when one is too long
+    if (info.path) item('Copy path', ellipsize(info.path, 32, true), function () { copyText(info.path, 'Path copied'); });
+    menu.appendChild(el('div', { class: 'sep' }));
+    item('Copy everything here', null, function () { copyText(info.all, 'Copied all ' + info.all.split('\n').length + ' lines'); });
+    menu.classList.remove('hidden');
+    placeContextMenu(x, y);
+  }
+
+  // Headers copy as `Name: value` lines — the format the resend editor takes.
+  function headerLabel(text, headers) {
+    var has = headers && typeof headers === 'object' && Object.keys(headers).length;
+    return sectionLabel(text, has ? function () { return headersToLines(headers); } : null, 'headers');
+  }
+
+  // A section heading with a Copy button for the whole thing next to it.
+  function sectionLabel(text, getText, what) {
+    var lab = el('div', { class: 'section-label' }, [el('span', { text: text })]);
+    if (getText) {
+      lab.appendChild(el('button', {
+        class: 'copy-link', type: 'button', title: 'Copy the whole ' + what,
+        text: 'Copy', onclick: function () { copyText(getText(), what.charAt(0).toUpperCase() + what.slice(1) + ' copied'); }
+      }));
+    }
+    return lab;
   }
   function jsonOrPre(text, opts) {
     if (text == null || text === '') return el('pre', { class: 'block', text: '(none)' });
@@ -419,10 +480,12 @@
   function tagged(node, sk) { if (node && sk) node.setAttribute('data-sk', sk); return node; }
 
   // Query viewer with an "Inline fragments" toggle (shown only when the query
-  // actually uses fragment spreads).
-  function queryBlock(query, sk) {
+  // actually uses fragment spreads). Owns its heading so the Copy button there
+  // hands over the query as currently shown, expanded or not.
+  function queryBlock(query, sk, labelText, note) {
     var wrap = el('div');
     var holder = el('div');
+    var shown = '';
     var cb = el('input', { type: 'checkbox' });
     var lbl = el('label', { class: 'tcheck inline' }, [cb, document.createTextNode(' Inline fragments')]);
     var bar = el('div', { class: 'findbar' }, [lbl]);
@@ -430,11 +493,14 @@
       holder.textContent = '';
       var q = query || '(not available)';
       if (cb.checked && window.GQLCode && GQLCode.inlineFragments) { try { q = GQLCode.inlineFragments(query); } catch (e) {} }
+      shown = fmtQuery(q);
       holder.appendChild(tagged(codeBlock(q, 'graphql'), cb.checked ? null : sk));
     }
     cb.addEventListener('change', render);
     if (!/\.\.\.[A-Za-z_]/.test(query || '')) bar.style.display = 'none'; // no fragment spreads → hide toggle
     render();
+    wrap.appendChild(sectionLabel(labelText, function () { return shown; }, 'query'));
+    if (note) wrap.appendChild(el('div', { class: 'muted', text: note }));
     wrap.appendChild(bar);
     wrap.appendChild(holder);
     return wrap;
@@ -514,8 +580,9 @@
 
     var head = $('detail-head');
     head.textContent = '';
-    head.appendChild(el('div', { class: 'op-name', text: rec.operationName }));
-    head.appendChild(el('div', { class: 'op-url', text: (rec.method || '') + '  ' + (rec.url || '') }));
+    var urlLine = (rec.method || '') + '  ' + (rec.url || '');
+    head.appendChild(el('div', { class: 'op-name', text: rec.operationName, title: rec.operationName }));
+    head.appendChild(el('div', { class: 'op-url', text: urlLine, title: urlLine }));
     var dup = dupInfo[rec.id];
     if (dup) head.appendChild(dupBanner(rec, dup));
 
@@ -523,17 +590,20 @@
     var reqPane = document.querySelector('.tabpane[data-pane="request"]');
     reqPane.textContent = '';
     reqPane.appendChild(makeFindBar(reqPane));
-    reqPane.appendChild(el('div', { class: 'section-label', text: 'Operation type' }));
+    reqPane.appendChild(sectionLabel('Operation type'));
     reqPane.appendChild(el('div', { text: rec.operationType + (rec.isBatch ? ' (batched)' : '') + (rec.isResent ? '  · resent from a captured request' : '') }));
     (rec.entries || []).forEach(function (entry, i) {
-      reqPane.appendChild(el('div', { class: 'section-label', text: 'Query' + ((rec.entries.length > 1) ? ' #' + (i + 1) + ' — ' + entry.operationName : '') }));
-      if (entry.persisted) reqPane.appendChild(el('div', { class: 'muted', text: 'Persisted query (hash only — no query text sent).' }));
-      reqPane.appendChild(queryBlock(entry.query, 'q' + i)); // foldable, with inline-fragments toggle
-      reqPane.appendChild(el('div', { class: 'section-label', text: 'Variables' }));
-      reqPane.appendChild(tagged(codeBlock(prettyJson(entry.variables != null ? entry.variables : {}), 'json', { autoCollapseLines: AUTO_COLLAPSE }), 'v' + i));
+      // foldable, with inline-fragments toggle; brings its own "Query" heading
+      reqPane.appendChild(queryBlock(entry.query, 'q' + i,
+        'Query' + ((rec.entries.length > 1) ? ' #' + (i + 1) + ' — ' + entry.operationName : ''),
+        entry.persisted ? 'Persisted query (hash only — no query text sent).' : null));
+      var vars = prettyJson(entry.variables != null ? entry.variables : {});
+      reqPane.appendChild(sectionLabel('Variables', function () { return vars; }, 'variables'));
+      reqPane.appendChild(tagged(codeBlock(vars, 'json', { autoCollapseLines: AUTO_COLLAPSE }), 'v' + i));
     });
     if (rec.requestBody) {
-      reqPane.appendChild(el('div', { class: 'section-label', text: 'Raw request body' + (rec.requestBodyTruncated ? ' (truncated — resend disabled)' : '') }));
+      reqPane.appendChild(sectionLabel('Raw request body' + (rec.requestBodyTruncated ? ' (truncated — resend disabled)' : ''),
+        function () { return prettyJson(rec.requestBody); }, 'request body'));
       reqPane.appendChild(tagged(jsonOrPre(rec.requestBody, { autoCollapseLines: AUTO_COLLAPSE }), 'rb'));
     }
 
@@ -542,10 +612,10 @@
     resPane.textContent = '';
     resPane.appendChild(makeFindBar(resPane));
     var st = statusInfo(rec);
-    resPane.appendChild(el('div', { class: 'section-label', text: 'Status' }));
+    resPane.appendChild(sectionLabel('Status'));
     resPane.appendChild(el('div', { text: (rec.status != null ? String(rec.status) : 'pending') + (rec.statusText ? ' ' + rec.statusText : '') + (rec.durationMs != null ? '  ·  ' + Math.round(rec.durationMs) + ' ms' : '') }));
-    if (rec.error) { resPane.appendChild(el('div', { class: 'section-label', text: 'Error' })); resPane.appendChild(el('pre', { class: 'block', text: rec.error })); }
-    resPane.appendChild(el('div', { class: 'section-label', text: 'Body' }));
+    if (rec.error) { resPane.appendChild(sectionLabel('Error')); resPane.appendChild(el('pre', { class: 'block', text: rec.error })); }
+    resPane.appendChild(sectionLabel('Body', rec.responseBody != null ? function () { return prettyJson(rec.responseBody); } : null, 'response'));
     resPane.appendChild(rec.responseBody != null ? tagged(jsonOrPre(rec.responseBody, { autoCollapseLines: AUTO_COLLAPSE }), 'res') : el('pre', { class: 'block', text: '(no response yet)' }));
 
     // headers
@@ -558,14 +628,14 @@
       var sent = {};
       wire.headers.forEach(function (h) { sent[h.name] = h.value; });
       if (wire.cookie && !sent.Cookie && !sent.cookie) sent.Cookie = wire.cookie;
-      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers (as sent on the wire)' }));
+      hPane.appendChild(headerLabel('Request headers (as sent on the wire)', sent));
       hPane.appendChild(kvTable(sent));
-      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers set by the page' }));
+      hPane.appendChild(headerLabel('Request headers set by the page', rec.requestHeaders));
     } else {
-      hPane.appendChild(el('div', { class: 'section-label', text: 'Request headers' }));
+      hPane.appendChild(headerLabel('Request headers', rec.requestHeaders));
     }
     hPane.appendChild(kvTable(rec.requestHeaders));
-    hPane.appendChild(el('div', { class: 'section-label', text: 'Response headers' }));
+    hPane.appendChild(headerLabel('Response headers', rec.responseHeaders));
     hPane.appendChild(kvTable(rec.responseHeaders));
 
     // meta
@@ -888,10 +958,15 @@
     item('Copy operation name', '', function () { copyText(primary, 'Operation name copied'); });
     item('Copy query', '', function () { copyText(primaryQuery(rec), 'Query copied'); });
     item('Copy variables', '', function () { copyText(primaryVars(rec), 'Variables copied'); });
+    item('Copy response', '', function () { copyText(prettyJson(rec.responseBody), 'Response copied'); }, rec.responseBody == null || rec.responseBody === '');
     item('Copy as cURL', '', function () { copyCurl(rec); });
 
     menu.classList.remove('hidden');
-    // reposition to stay on-screen
+    placeContextMenu(x, y);
+  }
+  // Keep the menu on-screen wherever it was summoned from.
+  function placeContextMenu(x, y) {
+    var menu = $('ctx-menu');
     var rect = menu.getBoundingClientRect();
     var px = Math.min(x, window.innerWidth - rect.width - 6);
     var py = Math.min(y, window.innerHeight - rect.height - 6);
@@ -917,6 +992,7 @@
   window.addEventListener('blur', hideContextMenu);
   $('list-pane').addEventListener('scroll', hideContextMenu);
   $('search-pane').addEventListener('scroll', hideContextMenu);
+  document.querySelector('.tabpanes').addEventListener('scroll', hideContextMenu, true);
 
   function primaryOpName(rec) {
     if (rec.entries && rec.entries.length && rec.entries[0].operationName) return rec.entries[0].operationName;

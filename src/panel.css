@@ -131,7 +131,7 @@ table.kv tr.kv-match { background: color-mix(in srgb, var(--amber) 28%, transpar
    flex-basis so the width survives toggling the search pane */
 #split { flex: 1; display: flex; min-height: 0; }
 #list-pane { flex: 0 0 58%; overflow: auto; position: relative; }
-#detail-pane { flex: 1 1 0; overflow: auto; min-width: 260px; }
+#detail-pane { flex: 1 1 0; overflow: hidden; min-width: 260px; display: flex; flex-direction: column; }
 #splitter { flex: 0 0 5px; position: relative; cursor: col-resize; background: none; }
 #splitter::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 1px;
@@ -211,14 +211,32 @@ body.resizing { cursor: col-resize; user-select: none; }
   border: 1px solid var(--border); border-radius: 5px; padding: 6px 0;
   overflow: auto; max-height: 360px; margin: 0 0 8px;
 }
-.cv-row { display: flex; white-space: pre; line-height: 1.5; }
+/* rows carry an opaque background of their own so the sticky gutter can
+   `inherit` it and stay readable when a long line is scrolled underneath */
+.cv-row { display: flex; white-space: pre; line-height: 1.5; background: var(--bg-2); }
 .cv-row:hover { background: var(--row-hover); }
+/* dimmed via the text colour, never `opacity` — that would make the sticky
+   background translucent and let a scrolled-past line show through */
 .cv-gutter {
-  flex: 0 0 auto; width: 16px; text-align: center; color: var(--muted);
-  cursor: default; user-select: none; opacity: .7; font-size: 10px;
+  flex: 0 0 auto; width: 16px; text-align: center; font-size: 10px;
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+  cursor: default; user-select: none;
+  position: sticky; left: 0; z-index: 1; background: inherit;
 }
 .cv-gutter.cv-foldable { cursor: pointer; }
-.cv-gutter.cv-foldable:hover { color: var(--accent); opacity: 1; }
+.cv-gutter.cv-foldable:hover { color: var(--accent); }
+
+/* per-row copy button — appears on hover, previews what it will take */
+.cv-copy {
+  flex: 0 0 auto; width: 18px; display: flex; align-items: center; justify-content: center;
+  position: sticky; left: 16px; z-index: 1; background: inherit;
+  color: var(--muted); cursor: pointer; user-select: none;
+}
+.cv-copy svg { opacity: 0; }
+.cv-row:hover .cv-copy svg, .cv-copy.cv-copied svg { opacity: 1; }
+.cv-copy:hover { color: var(--accent); }
+.cv-copy.cv-copied { color: var(--green); }
+.cv-row.cv-copyhi { background: color-mix(in srgb, var(--accent) 13%, var(--bg-2)); }
 .cv-code { flex: 1; padding-right: 10px; white-space: pre; }
 .cv-ellipsis { display: none; color: var(--muted); background: var(--bg-3); border-radius: 3px; }
 .cv-row.cv-collapsed .cv-ellipsis { display: inline; }
@@ -262,8 +280,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .find-nav:hover:not(:disabled) { color: var(--text); }
 .find-nav:disabled { opacity: .4; cursor: default; }
 .find-count { font-size: 11px; }
-.cv-row.cv-match { background: color-mix(in srgb, var(--amber) 28%, transparent); }
-.cv-row.cv-match.cv-active { background: color-mix(in srgb, var(--amber) 55%, transparent); }
+.cv-row.cv-match { background: color-mix(in srgb, var(--amber) 28%, var(--bg-2)); }
+.cv-row.cv-match.cv-active { background: color-mix(in srgb, var(--amber) 55%, var(--bg-2)); }
 .tcheck.inline.endcap { align-self: flex-end; padding-bottom: 6px; white-space: nowrap; }
 .delay-input { display: inline-flex; align-items: center; gap: 6px; }
 .delay-input input { width: 120px; }
@@ -272,18 +290,32 @@ body.resizing { cursor: col-resize; user-select: none; }
 .empty { padding: 24px; color: var(--muted); text-align: center; }
 .empty .hint { font-size: 11px; max-width: 380px; margin: 8px auto; }
 
-/* detail */
-#detail-head { padding: 10px 12px; border-bottom: 1px solid var(--border); }
-#detail-head .op-name { font-weight: 600; font-size: 13px; word-break: break-all; }
-#detail-head .op-url { color: var(--muted); font-family: var(--mono); font-size: 11px; word-break: break-all; margin-top: 3px; }
-.tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); }
+/* detail — the title bar (name, URL and the tabs) is fixed; only the pane below
+   it scrolls, so you can always switch tabs from anywhere in a long response */
+#detail { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#detail-top {
+  flex: 0 0 auto; display: flex; align-items: flex-end; flex-wrap: wrap; gap: 0 12px;
+  padding: 10px 12px 0; border-bottom: 1px solid var(--border); background: var(--bg);
+}
+#detail-head { flex: 1 1 160px; min-width: 0; padding-bottom: 8px; }
+/* one line each, so the tabs fit alongside — both carry a title with the full text */
+#detail-head .op-name,
+#detail-head .op-url { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#detail-head .op-name { font-weight: 600; font-size: 13px; }
+#detail-head .op-url { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-top: 3px; }
+.tabs { display: flex; gap: 2px; flex: 0 0 auto; margin-left: auto; }
 .tab { font: inherit; background: none; border: none; color: var(--muted); padding: 5px 10px; cursor: pointer; border-bottom: 2px solid transparent; }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
-.tabpanes { padding: 10px 12px; }
+.tabpanes { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; }
 .tabpane { display: none; }
 .tabpane.active { display: block; }
-.section-label { font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
+.section-label { display: flex; align-items: center; gap: 8px; font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
+.copy-link {
+  font: inherit; font-size: 11px; font-weight: 400; color: var(--muted); background: none;
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; cursor: pointer;
+}
+.copy-link:hover { color: var(--accent); border-color: var(--accent); }
 pre.block {
   margin: 0 0 8px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border);
   border-radius: 5px; overflow: auto; max-height: 340px; font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
@@ -304,6 +336,13 @@ table.kv td.v { word-break: break-all; }
   background: none; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer;
 }
 .ctx button:hover { background: var(--accent); color: #fff; }
+.ctx { max-width: 380px; }
+.ctx button:has(.ctx-hint) { display: flex; align-items: baseline; gap: 14px; }
+.ctx-hint {
+  margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--muted);
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx button:hover .ctx-hint { color: rgba(255,255,255,.8); }
 .ctx .sep { height: 1px; background: var(--border); margin: 4px 2px; }
 .ctx button.danger { color: var(--red); }
 .ctx button.danger:hover { background: var(--red); color: #fff; }

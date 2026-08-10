@@ -25,6 +25,16 @@ menu — plus persistent rules that intercept future traffic.
   them and filters the list. The window (`≤250ms` … `≤5s`, default `≤1s`) is a dropdown
   next to the chip and re-clusters live. Query formatting and JSON key order are
   ignored when comparing; your own **Resend**s are never flagged.
+- **Copy any part of a response** — hover any line of a viewer (response, variables,
+  query, raw body) and a copy button appears next to the fold arrow; it highlights exactly
+  what it will take. On a line that opens a block it copies that whole subtree as
+  standalone, dedented JSON; on a leaf it copies the bare value, so an id pastes as
+  `abc-123` rather than `"abc-123",`. Right-click a line for **Copy with key**,
+  **Copy path** (`data.search.results[0].id`) or **Copy everything here**, and every
+  section heading (Query / Variables / Body / headers) has its own **Copy**.
+- **Fixed tab bar** — Request / Response / Headers / Timing live in the detail pane's
+  title bar and stay put while the pane scrolls, so you can switch tabs from the bottom
+  of a long response.
 - **Filter & find** — filter the list by text and by chips (All / Errors / Mutations /
   Ruled / Dupes, with live errored- and duplicate-op counts); the find-in-viewer box
   highlights every match in the query/response, shows `3 / 12`, and steps through them
@@ -52,7 +62,7 @@ menu — plus persistent rules that intercept future traffic.
     captured response so you can tweak it.
   - **Create rewrite rule…** — auto-modify the query, variables, or headers of future
     matching requests before they are sent.
-  - **Copy** operation name / query / variables / as a `cURL` command. The cURL is built
+  - **Copy** operation name / query / variables / response / as a `cURL` command. The cURL is built
     from the headers the request **actually left the browser with** — cookies (including
     `HttpOnly`), `Authorization` added by a service worker, `User-Agent`, `Origin`,
     `Referer`, `sec-*` — so it runs as-is in a terminal instead of 401ing. (It therefore

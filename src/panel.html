@@ -84,12 +84,15 @@
     <div id="detail-pane">
       <div id="detail-empty" class="empty"><p>Select an operation to see details.</p></div>
       <div id="detail" class="hidden">
-        <div id="detail-head"></div>
-        <div class="tabs">
-          <button class="tab active" data-tab="request">Request</button>
-          <button class="tab" data-tab="response">Response</button>
-          <button class="tab" data-tab="headers">Headers</button>
-          <button class="tab" data-tab="meta">Timing</button>
+        <!-- title bar: stays put while the panes below it scroll -->
+        <div id="detail-top">
+          <div id="detail-head"></div>
+          <div class="tabs">
+            <button class="tab active" data-tab="request">Request</button>
+            <button class="tab" data-tab="response">Response</button>
+            <button class="tab" data-tab="headers">Headers</button>
+            <button class="tab" data-tab="meta">Timing</button>
+          </div>
         </div>
         <div class="tabpanes">
           <div class="tabpane active" data-pane="request"></div>

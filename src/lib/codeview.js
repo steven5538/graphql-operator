@@ -3,8 +3,8 @@
  * syntax-highlighted code viewer used by the DevTools panel.
  *
  * Exposes GQLCode = { formatGraphQL, computeFoldRanges, highlightGraphQLLine,
- * highlightJsonLine, renderFoldableCode }. Also exports for Node so the
- * formatter can be unit-tested.
+ * highlightJsonLine, renderFoldableCode, copyInfo }. Also exports for Node so
+ * the formatter can be unit-tested.
  */
 (function (root) {
   'use strict';
@@ -133,6 +133,118 @@
     return toks;
   }
 
+  // ---- copy helpers -------------------------------------------------------
+  // Everything needed to copy one piece of a document: the value under a line,
+  // that value with its key, and (for JSON) the path that leads to it. They all
+  // work on the *formatted* lines, so what you copy is exactly what you see.
+  var JSON_KEY = /^\s*"((?:\\.|[^"\\])*)"\s*:[ \t]?/;
+
+  function indentOf(s) { return /^[ \t]*/.exec(s)[0].length; }
+  function tryParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+  // The value on a leaf line, without the comma that separates it from the next
+  // entry — a comma *inside* a string has to survive.
+  function valueToken(v) {
+    if (v.charAt(0) === '"') { var m = /^"(?:\\.|[^"\\])*"/.exec(v); if (m) return m[0]; }
+    return v.replace(/,\s*$/, '');
+  }
+
+  // What to call this line in a menu / toast: the JSON key, or the GraphQL field.
+  function keyAt(line, lang) {
+    line = line || '';
+    if (lang === 'json') { var m = JSON_KEY.exec(line); return m ? tryParse('"' + m[1] + '"') : null; }
+    var g = /^\s*(?:\.\.\.\s*(?:on\s+)?)?([_A-Za-z][_0-9A-Za-z]*)/.exec(line);
+    return g ? g[1] : null;
+  }
+
+  // The text of the block starting on line `i` — its whole subtree when that
+  // line opens one — dedented so it stands on its own. In JSON the key is kept
+  // only when asked for, and a lone string is unquoted: pasting `abc-123`
+  // somewhere else is the point, `"abc-123"` rarely is.
+  function textAt(lines, closeOf, i, lang, withKey) {
+    var end = closeOf[i] != null ? closeOf[i] : i;
+    var base = indentOf(lines[i] || '');
+    var out = [];
+    for (var n = i; n <= end && n < lines.length; n++) {
+      out.push(lines[n].slice(Math.min(base, indentOf(lines[n]))));
+    }
+    if (end > i) out[out.length - 1] = out[out.length - 1].replace(/,$/, ''); // a closer, never a string
+    if (lang !== 'json') return out.join('\n');
+
+    var m = JSON_KEY.exec(out[0]);
+    if (end > i) {
+      if (m && !withKey) out[0] = out[0].slice(m[0].length);
+      return out.join('\n');
+    }
+    var val = valueToken(m ? out[0].slice(m[0].length) : out[0].replace(/^\s+/, ''));
+    if (withKey && m) return '"' + m[1] + '": ' + val;
+    if (val.charAt(0) === '"') { var s = tryParse(val); if (s != null) return s; }
+    return val;
+  }
+
+  // "data.user.tags[0]" for the entry on line `i`. Walks the lines above it,
+  // tracking open containers by indentation (pretty-printed JSON is regular
+  // enough that this needs no parser).
+  function jsonPathAt(lines, i) {
+    var stack = [];  // one frame per open container: { at, isArray, count }
+    var path = [];   // the segment each open container hangs off
+    for (var n = 0; n <= i && n < lines.length; n++) {
+      var t = (lines[n] || '').replace(/^\s+/, '');
+      if (!t) continue;
+      var ind = indentOf(lines[n]);
+      if (t.charAt(0) === '}' || t.charAt(0) === ']') {
+        if (n === i) return renderPath(path);   // a closer names the block it ends
+        while (stack.length && stack[stack.length - 1].at >= ind) { stack.pop(); path.pop(); }
+        continue;
+      }
+      while (stack.length && stack[stack.length - 1].at >= ind) { stack.pop(); path.pop(); }
+      var top = stack[stack.length - 1];
+      var km = JSON_KEY.exec(t);
+      var seg = km ? { key: tryParse('"' + km[1] + '"') } : (top && top.isArray ? { index: top.count } : null);
+      if (top) top.count++;
+      if (n === i) return renderPath(path.concat([seg]));
+      var last = t.replace(/,\s*$/, '').slice(-1);
+      if (last === '{' || last === '[') { stack.push({ at: ind, isArray: last === '[', count: 0 }); path.push(seg); }
+    }
+    return '';
+  }
+  function renderPath(segs) {
+    var s = '';
+    segs.forEach(function (g) {
+      if (!g) return;
+      if (g.index != null) s += '[' + g.index + ']';
+      else if (/^[A-Za-z_$][\w$]*$/.test(g.key)) s += (s ? '.' : '') + g.key;
+      else s += '[' + JSON.stringify(g.key) + ']';
+    });
+    return s;
+  }
+
+  function copyInfoAt(lines, closeOf, i, lang) {
+    var isBlock = closeOf[i] != null;
+    return {
+      line: i,
+      lang: lang,
+      isBlock: isBlock,
+      lineCount: isBlock ? closeOf[i] - i + 1 : 1,
+      key: keyAt(lines[i], lang),
+      value: textAt(lines, closeOf, i, lang, false),
+      withKey: textAt(lines, closeOf, i, lang, true),
+      path: lang === 'json' ? jsonPathAt(lines, i) : '',
+      all: lines.join('\n')
+    };
+  }
+
+  // Same thing from raw text — formats first, so line numbers line up with what
+  // renderFoldableCode() shows.
+  function copyInfo(text, lang, line) {
+    var formatted = lang === 'graphql' ? formatGraphQL(text) : String(text);
+    var lines = formatted.split('\n');
+    var closeOf = {};
+    computeFoldRanges(formatted, lang).forEach(function (r) {
+      if (closeOf[r.open] == null || r.close > closeOf[r.open]) closeOf[r.open] = r.close;
+    });
+    return copyInfoAt(lines, closeOf, line, lang);
+  }
+
   // ---- DOM renderer (browser only) ---------------------------------------
   function renderFoldableCode(text, lang, opts) {
     opts = opts || {};
@@ -160,6 +272,54 @@
     var rowEls = [];
     var highlight = lang === 'graphql' ? highlightGraphQLLine : highlightJsonLine;
 
+    function svg(tag, attrs) {
+      var e = doc.createElementNS('http://www.w3.org/2000/svg', tag);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    }
+    function icon(kind) {
+      var s = svg('svg', { viewBox: '0 0 16 16', width: '11', height: '11', fill: 'none',
+        stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+      if (kind === 'check') { s.appendChild(svg('path', { d: 'M2.5 8.5 6 12 13.5 4' })); return s; }
+      s.appendChild(svg('rect', { x: '5.6', y: '5.6', width: '9.6', height: '9.6', rx: '2' }));
+      s.appendChild(svg('path', { d: 'M10.4 4.4V2.8a2 2 0 0 0-2-2H2.8a2 2 0 0 0-2 2v5.6a2 2 0 0 0 2 2h1.6' }));
+      return s;
+    }
+    // Hovering the button previews exactly what a click will copy.
+    function preview(i, on) {
+      var end = closeOf[i] != null ? closeOf[i] : i;
+      for (var n = i; n <= end && n < rowEls.length; n++) rowEls[n].classList.toggle('cv-copyhi', on);
+    }
+    function copyButton(i) {
+      var btn = doc.createElement('span');
+      btn.className = 'cv-copy';
+      btn.setAttribute('role', 'button');
+      btn.appendChild(icon('copy'));
+      var info = null; // computed on demand — cheap per row, but there can be thousands
+      function describe() {
+        info = info || copyInfoAt(lines, closeOf, i, lang);
+        btn.title = (info.isBlock ? 'Copy this block (' + info.lineCount + ' lines)' : 'Copy this value') +
+          (info.key ? ' — ' + info.key : '') + '   ·   right-click for more';
+        return info;
+      }
+      btn.addEventListener('mouseenter', function () { describe(); preview(i, true); });
+      btn.addEventListener('mouseleave', function () { preview(i, false); });
+      btn.addEventListener('click', function () {
+        var nfo = describe();
+        if (opts.copy) opts.copy(nfo.value, nfo);
+        else if (root.navigator && root.navigator.clipboard) root.navigator.clipboard.writeText(nfo.value);
+        btn.textContent = '';
+        btn.appendChild(icon('check'));
+        btn.classList.add('cv-copied');
+        setTimeout(function () {
+          btn.textContent = '';
+          btn.appendChild(icon('copy'));
+          btn.classList.remove('cv-copied');
+        }, 1000);
+      });
+      return btn;
+    }
+
     lines.forEach(function (ln, i) {
       var row = doc.createElement('div');
       row.className = 'cv-row';
@@ -174,6 +334,8 @@
           update();
         });
       }
+      row.appendChild(gutter);
+      row.appendChild(copyButton(i));
       var code = doc.createElement('span');
       code.className = 'cv-code';
       highlight(ln).forEach(function (tk) {
@@ -186,8 +348,13 @@
       ell.className = 'cv-ellipsis';
       ell.textContent = ' … ';
       code.appendChild(ell);
-      row.appendChild(gutter);
       row.appendChild(code);
+      if (opts.menu) {
+        row.addEventListener('contextmenu', function (e) {
+          e.preventDefault();
+          opts.menu(copyInfoAt(lines, closeOf, i, lang), e.clientX, e.clientY);
+        });
+      }
       wrap.appendChild(row);
       rowEls.push(row);
     });
@@ -291,6 +458,7 @@
     formatGraphQL: formatGraphQL,
     inlineFragments: inlineFragments,
     computeFoldRanges: computeFoldRanges,
+    copyInfo: copyInfo,
     highlightGraphQLLine: highlightGraphQLLine,
     highlightJsonLine: highlightJsonLine,
     renderFoldableCode: renderFoldableCode
