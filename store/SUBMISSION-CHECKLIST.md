@@ -13,7 +13,7 @@
 - [ ] Build the upload zip (already produced): `graphql-operator-v1.6.0.zip`.
       Rebuild after any change with:
       ```bash
-      rm -f graphql-operator-v*.zip
+      find . -maxdepth 1 -name 'graphql-operator-v*.zip' -delete  # not `rm v*.zip`: zsh errors when nothing matches
       zip -r "graphql-operator-v$(node -e "process.stdout.write(require('./manifest.json').version)").zip" \
         manifest.json src icons README.md -x '*.DS_Store'
       ```
