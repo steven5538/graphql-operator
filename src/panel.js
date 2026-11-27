@@ -404,15 +404,29 @@
   }
 
   // Foldable, syntax-highlighted code block (falls back to <pre> if codeview missing).
-  // opts.autoCollapseLines auto-folds blocks taller than N lines (used for bodies).
-  // Every row can copy the piece of the document it opens — see copyRow/copyRowMenu.
-  var AUTO_COLLAPSE = 24;
-  function codeBlock(text, lang, opts) {
+  // It opens fully expanded; the heading's Expand all / Collapse all (foldLinks)
+  // folds it down to an outline. Every row can copy the piece of the document it
+  // opens — see copyRow/copyRowMenu.
+  function codeBlock(text, lang) {
     if (window.GQLCode && text != null && text !== '') {
-      var full = Object.assign({}, opts || {}, { copy: copyRow, menu: copyRowMenu });
-      try { return GQLCode.renderFoldableCode(String(text), lang, full); } catch (e) { /* fall through */ }
+      try { return GQLCode.renderFoldableCode(String(text), lang, { copy: copyRow, menu: copyRowMenu }); } catch (e) { /* fall through */ }
     }
     return el('pre', { class: 'block', text: (text == null || text === '') ? '(empty)' : String(text) });
+  }
+
+  // Expand all / Collapse all for one viewer, to sit in its heading. Nothing for
+  // a block with nothing nested to fold (a flat variables object, a <pre>).
+  function foldLinks(block) {
+    var f = block && block.cvFold;
+    if (!f || !f.count) return [];
+    return [
+      el('button', { class: 'fold-link', type: 'button', text: 'Expand all', title: 'Unfold every block', onclick: f.expandAll }),
+      el('button', { class: 'fold-link', type: 'button', text: 'Collapse all', title: 'Fold every nested block, leaving the top-level outline', onclick: f.collapseAll })
+    ];
+  }
+  function withFoldLinks(label, block) {
+    foldLinks(block).forEach(function (b) { label.appendChild(b); });
+    return label;
   }
 
   // ---- copying a piece of a viewer ---------------------------------------
@@ -469,11 +483,11 @@
     }
     return lab;
   }
-  function jsonOrPre(text, opts) {
+  function jsonOrPre(text) {
     if (text == null || text === '') return el('pre', { class: 'block', text: '(none)' });
     var parses = false;
     try { JSON.parse(typeof text === 'string' ? text : JSON.stringify(text)); parses = true; } catch (e) {}
-    return parses ? codeBlock(prettyJson(text), 'json', opts) : el('pre', { class: 'block', text: String(text) });
+    return parses ? codeBlock(prettyJson(text), 'json') : el('pre', { class: 'block', text: String(text) });
   }
   // Tags a code block with the search key its text was derived from (see
   // lib/search.js) so a search hit can find the block and scroll to the line.
@@ -489,17 +503,24 @@
     var cb = el('input', { type: 'checkbox' });
     var lbl = el('label', { class: 'tcheck inline' }, [cb, document.createTextNode(' Inline fragments')]);
     var bar = el('div', { class: 'findbar' }, [lbl]);
+    // the fold buttons belong to whichever block is showing, inlined or not
+    var foldSlot = el('span', { class: 'fold-links' });
     function render() {
       holder.textContent = '';
       var q = query || '(not available)';
       if (cb.checked && window.GQLCode && GQLCode.inlineFragments) { try { q = GQLCode.inlineFragments(query); } catch (e) {} }
       shown = fmtQuery(q);
-      holder.appendChild(tagged(codeBlock(q, 'graphql'), cb.checked ? null : sk));
+      var block = codeBlock(q, 'graphql');
+      holder.appendChild(tagged(block, cb.checked ? null : sk));
+      foldSlot.textContent = '';
+      foldLinks(block).forEach(function (b) { foldSlot.appendChild(b); });
     }
     cb.addEventListener('change', render);
     if (!/\.\.\.[A-Za-z_]/.test(query || '')) bar.style.display = 'none'; // no fragment spreads → hide toggle
     render();
-    wrap.appendChild(sectionLabel(labelText, function () { return shown; }, 'query'));
+    var label = sectionLabel(labelText, function () { return shown; }, 'query');
+    label.appendChild(foldSlot);
+    wrap.appendChild(label);
     if (note) wrap.appendChild(el('div', { class: 'muted', text: note }));
     wrap.appendChild(bar);
     wrap.appendChild(holder);
@@ -598,13 +619,15 @@
         'Query' + ((rec.entries.length > 1) ? ' #' + (i + 1) + ' — ' + entry.operationName : ''),
         entry.persisted ? 'Persisted query (hash only — no query text sent).' : null));
       var vars = prettyJson(entry.variables != null ? entry.variables : {});
-      reqPane.appendChild(sectionLabel('Variables', function () { return vars; }, 'variables'));
-      reqPane.appendChild(tagged(codeBlock(vars, 'json', { autoCollapseLines: AUTO_COLLAPSE }), 'v' + i));
+      var varsBlock = codeBlock(vars, 'json');
+      reqPane.appendChild(withFoldLinks(sectionLabel('Variables', function () { return vars; }, 'variables'), varsBlock));
+      reqPane.appendChild(tagged(varsBlock, 'v' + i));
     });
     if (rec.requestBody) {
-      reqPane.appendChild(sectionLabel('Raw request body' + (rec.requestBodyTruncated ? ' (truncated — resend disabled)' : ''),
-        function () { return prettyJson(rec.requestBody); }, 'request body'));
-      reqPane.appendChild(tagged(jsonOrPre(rec.requestBody, { autoCollapseLines: AUTO_COLLAPSE }), 'rb'));
+      var bodyBlock = jsonOrPre(rec.requestBody);
+      reqPane.appendChild(withFoldLinks(sectionLabel('Raw request body' + (rec.requestBodyTruncated ? ' (truncated — resend disabled)' : ''),
+        function () { return prettyJson(rec.requestBody); }, 'request body'), bodyBlock));
+      reqPane.appendChild(tagged(bodyBlock, 'rb'));
     }
 
     // response
@@ -615,8 +638,9 @@
     resPane.appendChild(sectionLabel('Status'));
     resPane.appendChild(el('div', { text: (rec.status != null ? String(rec.status) : 'pending') + (rec.statusText ? ' ' + rec.statusText : '') + (rec.durationMs != null ? '  ·  ' + Math.round(rec.durationMs) + ' ms' : '') }));
     if (rec.error) { resPane.appendChild(sectionLabel('Error')); resPane.appendChild(el('pre', { class: 'block', text: rec.error })); }
-    resPane.appendChild(sectionLabel('Body', rec.responseBody != null ? function () { return prettyJson(rec.responseBody); } : null, 'response'));
-    resPane.appendChild(rec.responseBody != null ? tagged(jsonOrPre(rec.responseBody, { autoCollapseLines: AUTO_COLLAPSE }), 'res') : el('pre', { class: 'block', text: '(no response yet)' }));
+    var resBlock = rec.responseBody != null ? tagged(jsonOrPre(rec.responseBody), 'res') : el('pre', { class: 'block', text: '(no response yet)' });
+    resPane.appendChild(withFoldLinks(sectionLabel('Body', rec.responseBody != null ? function () { return prettyJson(rec.responseBody); } : null, 'response'), resBlock));
+    resPane.appendChild(resBlock);
 
     // headers
     var hPane = document.querySelector('.tabpane[data-pane="headers"]');

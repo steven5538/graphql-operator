@@ -205,15 +205,26 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .dup-link:hover { background: var(--dup); color: var(--bg); }
 
-/* foldable code viewer */
+/* foldable code viewer — no height cap: a block grows to fit its content and the
+   tab pane under the pinned tab bar is the one vertical scroller (no scrollbar
+   nested inside another). It scrolls sideways only when a line is wider than the
+   pane. */
 .codeview {
   font-family: var(--mono); font-size: 12px; background: var(--bg-2);
   border: 1px solid var(--border); border-radius: 5px; padding: 6px 0;
-  overflow: auto; max-height: 360px; margin: 0 0 8px;
+  overflow-x: auto; overflow-y: hidden; margin: 0 0 8px;
 }
 /* rows carry an opaque background of their own so the sticky gutter can
    `inherit` it and stay readable when a long line is scrolled underneath */
-.cv-row { display: flex; white-space: pre; line-height: 1.5; background: var(--bg-2); }
+/* Blocks open fully expanded, and a big response is tens of thousands of rows:
+   `content-visibility: auto` lets the browser skip laying out the ones scrolled
+   out of view. That clips each row to its own box, so a row is sized to its
+   line (max-content, at least the block's width) rather than to the block. */
+.cv-row {
+  display: flex; white-space: pre; line-height: 1.5; background: var(--bg-2);
+  width: max-content; min-width: 100%;
+  content-visibility: auto; contain-intrinsic-height: auto 18px;
+}
 .cv-row:hover { background: var(--row-hover); }
 /* dimmed via the text colour, never `opacity` — that would make the sticky
    background translucent and let a scrolled-past line show through */
@@ -311,14 +322,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tabpane { display: none; }
 .tabpane.active { display: block; }
 .section-label { display: flex; align-items: center; gap: 8px; font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
-.copy-link {
+.copy-link, .fold-link {
   font: inherit; font-size: 11px; font-weight: 400; color: var(--muted); background: none;
   border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; cursor: pointer;
 }
-.copy-link:hover { color: var(--accent); border-color: var(--accent); }
+.copy-link:hover, .fold-link:hover { color: var(--accent); border-color: var(--accent); }
+.fold-links { display: inline-flex; gap: 8px; }
+.fold-links:empty { display: none; }
 pre.block {
   margin: 0 0 8px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: 5px; overflow: auto; max-height: 340px; font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
+  border-radius: 5px; overflow: auto; font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 table.kv { width: 100%; border-collapse: collapse; }
 table.kv td { padding: 2px 6px; border-bottom: 1px solid var(--border); vertical-align: top; font-family: var(--mono); }

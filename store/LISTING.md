@@ -34,7 +34,8 @@ _(120 characters — check the counter after any edit.)_
 > **Read it easily**
 > • Queries, variables, and responses render as collapsible, syntax‑highlighted code —
 >   not one giant escaped string.
-> • Large response/variable blocks auto‑collapse; an "Inline fragments" toggle expands
+> • Blocks open fully expanded with no nested scrollbars; Expand all / Collapse all folds a
+>   big response to its outline, and an "Inline fragments" toggle expands
 >   `...FragmentSpreads` in place so fragment‑heavy queries read as one tree.
 > • Filter by text or by chips (errors / mutations / ruled), and find text inside a
 >   query or response.

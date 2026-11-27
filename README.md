@@ -14,9 +14,12 @@ menu — plus persistent rules that intercept future traffic.
 - **DevTools panel** — a new **GraphQL** tab next to Network/Console, scoped to the
   inspected tab.
 - **Foldable, syntax-highlighted view** — queries and variables render as collapsible,
-  highlighted code instead of a raw escaped blob. Large response/variable blocks
-  auto-collapse; the query stays open. **Inline fragments** toggle expands `...Spreads`
-  in place so fragment-heavy queries read as one tree.
+  highlighted code instead of a raw escaped blob. Every block opens fully expanded and
+  grows to fit its content, so the detail pane is the only scrollbar; a block scrolls
+  sideways only when a line is wider than the pane. **Expand all** / **Collapse all**
+  next to a heading (Query / Variables / Body) folds a big block down to its top-level
+  outline and back. **Inline fragments** toggle expands `...Spreads` in place so
+  fragment-heavy queries read as one tree.
 - **Duplicate-call hint** — when the *same* operation (same URL, method, query and
   variables) fires twice inside a short window, every call in the burst is tinted
   orange and tagged `dup ×N`. That is almost always a bug: a double-firing effect, a

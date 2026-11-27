@@ -254,22 +254,16 @@
     var ranges = computeFoldRanges(formatted, lang);
     var closeOf = {};        // openLine -> closeLine (for header lines)
     ranges.forEach(function (r) { if (closeOf[r.open] == null || r.close > closeOf[r.open]) closeOf[r.open] = r.close; });
-    var collapsed = {};      // openLine -> true
-    // Auto-collapse only large ARRAY blocks (e.g. `edges: [ … ]`) that aren't the
-    // root — this hides the bulk while keeping the object structure/shape visible.
-    if (opts.autoCollapseLines > 0) {
-      Object.keys(closeOf).forEach(function (o) {
-        o = +o;
-        if (o === 0) return; // never fold the root
-        if (closeOf[o] - o <= opts.autoCollapseLines) return; // not large
-        var trimmed = (lines[o] || '').replace(/\s+$/, '');
-        if (trimmed.charAt(trimmed.length - 1) === '[') collapsed[o] = true; // arrays only
-      });
-    }
+    var collapsed = {};      // openLine -> true; everything starts expanded
+    // Blocks that open at column 0 (the JSON root, a GraphQL operation or
+    // fragment definition) stay open on "collapse all", so it leaves an outline
+    // one level deep instead of a single `{ … }`.
+    var nested = Object.keys(closeOf).map(Number).filter(function (o) { return indentOf(lines[o]) > 0; });
 
     var wrap = doc.createElement('div');
     wrap.className = 'codeview';
     var rowEls = [];
+    var gutters = {};        // openLine -> its fold arrow
     var highlight = lang === 'graphql' ? highlightGraphQLLine : highlightJsonLine;
 
     function svg(tag, attrs) {
@@ -327,10 +321,9 @@
       gutter.className = 'cv-gutter';
       if (closeOf[i] != null) {
         gutter.classList.add('cv-foldable');
-        gutter.textContent = collapsed[i] ? '▸' : '▾';
+        gutters[i] = gutter;
         gutter.addEventListener('click', function () {
           collapsed[i] = !collapsed[i];
-          gutter.textContent = collapsed[i] ? '▸' : '▾';
           update();
         });
       }
@@ -359,19 +352,30 @@
       rowEls.push(row);
     });
 
+    // One pass: a row is hidden while it sits inside any folded block above it.
+    // (Linear, so folding thousands of blocks at once stays instant.)
     function update() {
+      var hideUntil = -1;
       for (var i = 0; i < rowEls.length; i++) {
-        var hidden = false;
-        for (var o in collapsed) {
-          if (!collapsed[o]) continue;
-          o = +o;
-          if (o < i && i <= closeOf[o]) { hidden = true; break; }
-        }
-        rowEls[i].style.display = hidden ? 'none' : '';
-        rowEls[i].classList.toggle('cv-collapsed', !!collapsed[i]);
+        var folded = !!collapsed[i];
+        rowEls[i].style.display = i <= hideUntil ? 'none' : '';
+        rowEls[i].classList.toggle('cv-collapsed', folded);
+        if (gutters[i]) gutters[i].textContent = folded ? '▸' : '▾';
+        if (folded && closeOf[i] > hideUntil) hideUntil = closeOf[i];
       }
     }
     update();
+    // For the panel's Expand all / Collapse all; `count` is how many blocks
+    // collapseAll() folds, so a caller can skip the buttons when it's 0.
+    wrap.cvFold = {
+      count: nested.length,
+      expandAll: function () { collapsed = {}; update(); },
+      collapseAll: function () {
+        collapsed = {};
+        nested.forEach(function (o) { collapsed[o] = true; });
+        update();
+      }
+    };
     return wrap;
   }
 

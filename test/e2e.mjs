@@ -298,11 +298,21 @@ async function setRules(sw, rules) {
     g.click(); // collapse the outermost block
     const hidden = Array.prototype.filter.call(wrap.querySelectorAll('.cv-row'), (r) => r.style.display === 'none').length;
     const highlighted = wrap.querySelectorAll('.cv-t-k').length; // keyword tokens present
-    // auto-collapse: a large JSON body should start with big blocks folded
+    // a large JSON body opens fully expanded; collapseAll folds it to an outline
     const big = JSON.stringify({ data: { list: Array.from({ length: 40 }, function (_, i) { return { id: i }; }) } }, null, 2);
-    const w2 = GQLCode.renderFoldableCode(big, 'json', { autoCollapseLines: 24 });
+    const w2 = GQLCode.renderFoldableCode(big, 'json');
     document.body.appendChild(w2);
-    const autoHidden = Array.prototype.filter.call(w2.querySelectorAll('.cv-row'), (r) => r.style.display === 'none').length;
+    const hiddenRows = () => Array.prototype.filter.call(w2.querySelectorAll('.cv-row'), (r) => r.style.display === 'none').length;
+    // a visible row's code, with " …" only where the row is folded (no CSS on this page)
+    const visibleText = () => Array.prototype.filter.call(w2.querySelectorAll('.cv-row'), (r) => r.style.display !== 'none')
+      .map((r) => Array.prototype.filter.call(r.querySelector('.cv-code').children, (c) => !c.classList.contains('cv-ellipsis'))
+        .map((c) => c.textContent).join('') + (r.classList.contains('cv-collapsed') ? ' …' : ''));
+    const autoHidden = hiddenRows();
+    w2.cvFold.collapseAll();
+    const outline = { hidden: hiddenRows(), lines: visibleText(), arrow: w2.querySelectorAll('.cv-gutter')[1].textContent };
+    w2.cvFold.expandAll();
+    const reopened = { hidden: hiddenRows(), arrow: w2.querySelectorAll('.cv-gutter')[1].textContent };
+    const foldCount = w2.cvFold.count; // data, list, and the 40 items
     // inline fragments: spread should be replaced by the fragment's fields
     const inlined = GQLCode.inlineFragments('query Q { a { ...F } } fragment F on T { x y }');
     const inlineOk = /x[\s\S]*y/.test(inlined) && inlined.indexOf('fragment F') === -1;
@@ -315,13 +325,16 @@ async function setRules(sw, rules) {
       block: at(5).value, blockLines: at(5).lineCount,
       gql: GQLCode.copyInfo(src, 'graphql', 1).value
     };
-    return { rows, foldable, hidden, highlighted, autoHidden, inlineOk, copy, docLines: doc.split('\n') };
+    return { rows, foldable, hidden, highlighted, autoHidden, outline, reopened, foldCount, inlineOk, copy, docLines: doc.split('\n') };
   });
   check('renders multiple code rows', cv.rows > 3, cv.rows);
   check('has foldable blocks (incl. fragment)', cv.foldable >= 2, cv.foldable);
   check('collapsing a block hides rows', cv.hidden > 0, cv.hidden);
   check('applies syntax highlighting (keywords)', cv.highlighted > 0, cv.highlighted);
-  check('auto-collapses large JSON blocks by default', cv.autoHidden > 0, cv.autoHidden);
+  check('large JSON blocks open fully expanded', cv.autoHidden === 0, cv.autoHidden);
+  check('collapseAll folds every nested block but leaves the root open',
+    cv.foldCount === 42 && cv.outline.lines.join('|') === '{|  "data": { …|}' && cv.outline.arrow === '▸', cv.outline);
+  check('expandAll unfolds everything again', cv.reopened.hidden === 0 && cv.reopened.arrow === '▾', cv.reopened);
   check('inline fragments expands spreads inline', cv.inlineOk);
   check('a leaf copies as its bare value, keeping a comma inside the string',
     cv.copy.note === 'a, b' && cv.copy.noteKeyed === '"note": "a, b"' && cv.copy.num === '-1.5', cv.copy);
@@ -1413,7 +1426,115 @@ async function setRules(sw, rules) {
   check('no panel page errors while copying', copyErrors.length === 0, copyErrors);
   await copyPanel.close();
 
-  console.log('\n[22] no fatal page errors');
+  console.log('\n[22] viewers grow to fit, open expanded, and fold from their heading');
+  const foldPanel = await context.newPage();
+  const foldErrors = [];
+  foldPanel.on('pageerror', (e) => foldErrors.push(String(e)));
+  await foldPanel.addInitScript(() => {
+    window.chrome = window.chrome || {};
+    try { window.chrome.devtools = { inspectedWindow: { tabId: 999994 } }; } catch (e) {}
+  });
+  await foldPanel.setViewportSize({ width: 1200, height: 700 });
+  await foldPanel.goto('chrome-extension://' + extId + '/src/panel.html', { waitUntil: 'load' });
+  const BIG_RESULTS = Array.from({ length: 80 }, (_, i) => ({ id: 'job-' + i, title: 'Job ' + i }));
+  await foldPanel.setInputFiles('#import-file', {
+    name: 'fold.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      tool: 'graphql-operator', version: 1,
+      operations: [
+        { id: 'f1', operationName: 'BigList', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql',
+          status: 200, ts: 1700000000000,
+          responseBody: JSON.stringify({ data: { search: { total: 80, results: BIG_RESULTS } } }),
+          entries: [{ operationName: 'BigList',
+            query: 'query BigList($filter: F!) { search(filter: $filter) { total results { ...R } } } fragment R on Result { id title }',
+            variables: { filter: { text: 'cook', tags: ['a', 'b'] }, note: 'x'.repeat(600) } }] },
+        { id: 'f2', operationName: 'Flat', operationType: 'query', method: 'POST', url: 'https://ex.test/graphql',
+          status: 200, ts: 1700000001000, responseBody: JSON.stringify({ data: { ok: true } }),
+          entries: [{ operationName: 'Flat', query: 'query Flat($q: String) { ok }', variables: { q: 'cook' } }] }
+      ]
+    }))
+  });
+  await foldPanel.waitForFunction(() => document.querySelectorAll('#op-rows tr').length === 2);
+  await foldPanel.click('#op-rows tr[data-id="f1"]');
+  await foldPanel.click('.tab[data-tab="response"]');
+
+  const resBlock = () => foldPanel.evaluate(() => {
+    const b = document.querySelector('.tabpane[data-pane="response"] [data-sk="res"]');
+    const panes = document.querySelector('.tabpanes');
+    return {
+      rows: b.querySelectorAll('.cv-row').length,
+      hidden: Array.prototype.filter.call(b.querySelectorAll('.cv-row'), (r) => r.style.display === 'none').length,
+      height: b.clientHeight, scrollHeight: b.scrollHeight,
+      sideways: b.scrollWidth > b.clientWidth,
+      paneScrolls: panes.scrollHeight > panes.clientHeight,
+      dataFolded: Array.prototype.some.call(b.querySelectorAll('.cv-row.cv-collapsed'), (r) => /"data": \{/.test(r.textContent))
+    };
+  });
+  const big = await resBlock();
+  check('a long response opens with every row showing', big.rows > 300 && big.hidden === 0, big);
+  check('it grows to its full height instead of scrolling inside a 360px box',
+    big.height > 2000 && big.scrollHeight <= big.height, big);
+  check('the tab pane is the one scroller', big.paneScrolls, big);
+  check('no sideways scrollbar when every line fits', !big.sideways, big);
+
+  const resLinks = await foldPanel.evaluate(() =>
+    Array.prototype.map.call(document.querySelectorAll('.tabpane[data-pane="response"] .section-label .fold-link'), (b) => b.textContent));
+  check('the Body heading offers Expand all / Collapse all', resLinks.join(',') === 'Expand all,Collapse all', resLinks);
+  const clickFold = (pane, heading, label) => foldPanel.evaluate(([p, h, l]) => {
+    const lab = Array.prototype.filter.call(document.querySelectorAll('.tabpane[data-pane="' + p + '"] .section-label'),
+      (x) => x.firstChild.textContent === h)[0];
+    Array.prototype.filter.call(lab.querySelectorAll('.fold-link'), (b) => b.textContent === l)[0].click();
+  }, [pane, heading, label]);
+  await clickFold('response', 'Body', 'Collapse all');
+  const folded = await resBlock();
+  check('Collapse all folds the response down to its outline',
+    folded.rows - folded.hidden === 3 && folded.dataFolded && folded.height < 200, folded);
+  await clickFold('response', 'Body', 'Expand all');
+  const unfolded = await resBlock();
+  check('Expand all opens every block again', unfolded.hidden === 0 && unfolded.height === big.height, unfolded);
+
+  await foldPanel.click('.tab[data-tab="request"]');
+  const req = await foldPanel.evaluate(() => {
+    const pane = document.querySelector('.tabpane[data-pane="request"]');
+    const v = pane.querySelector('[data-sk="v0"]');
+    const links = {};
+    pane.querySelectorAll('.section-label').forEach((l) => { links[l.firstChild.textContent] = l.querySelectorAll('.fold-link').length; });
+    return { links, sideways: v.scrollWidth > v.clientWidth, tall: v.scrollHeight > v.clientHeight };
+  });
+  check('a line wider than the pane scrolls sideways — only that block, never vertically',
+    req.sideways && !req.tall, req);
+  check('Query and nested Variables headings get fold buttons too',
+    req.links.Query === 2 && req.links.Variables === 2, req.links);
+
+  // Inline fragments swaps the query block; the buttons must drive the new one.
+  await foldPanel.click('.tabpane[data-pane="request"] .findbar .tcheck input');
+  await clickFold('request', 'Query', 'Collapse all');
+  const inlined = await foldPanel.evaluate(() => {
+    const pane = document.querySelector('.tabpane[data-pane="request"]');
+    const label = Array.prototype.filter.call(pane.querySelectorAll('.section-label'), (x) => x.firstChild.textContent === 'Query')[0];
+    const q = label.parentNode.querySelector('.codeview');
+    return {
+      buttons: label.querySelectorAll('.fold-link').length,
+      inlinedFields: /# \.\.\.R/.test(q.textContent),
+      hidden: Array.prototype.filter.call(q.querySelectorAll('.cv-row'), (r) => r.style.display === 'none').length
+    };
+  });
+  check('after Inline fragments, the Query buttons fold the expanded query (and are not duplicated)',
+    inlined.buttons === 2 && inlined.inlinedFields && inlined.hidden > 0, inlined);
+
+  await foldPanel.click('#op-rows tr[data-id="f2"]');
+  const flatLinks = await foldPanel.evaluate(() => {
+    const links = {};
+    document.querySelectorAll('.tabpane[data-pane="request"] .section-label').forEach((l) => {
+      links[l.firstChild.textContent] = l.querySelectorAll('.fold-link').length;
+    });
+    return links;
+  });
+  check('a flat variables object (nothing to fold) gets no fold buttons', flatLinks.Variables === 0, flatLinks);
+  check('no panel page errors while folding', foldErrors.length === 0, foldErrors);
+  await foldPanel.close();
+
+  console.log('\n[23] no fatal page errors');
   const gqlopErr = pageErrors.filter((e) => /GQLOP is not defined/.test(e));
   check('no "GQLOP is not defined" errors', gqlopErr.length === 0, gqlopErr);
   check('no uncaught page errors at all', pageErrors.length === 0, pageErrors);

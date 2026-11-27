@@ -122,7 +122,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   async function shot(name) { await page.screenshot({ path: path.join(OUT, name) }); console.log('  wrote store/screenshots/' + name); }
   const row = (name) => page.locator('#op-rows tr', { hasText: name }).first();
 
-  // 1) overview — a query with a rich, folded response
+  // 1) overview — a query with a rich, fully expanded response
   await row('ListProducts').click();
   await page.locator('.tab[data-tab="response"]').click();
   await sleep(200);
